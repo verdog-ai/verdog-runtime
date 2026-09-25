@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --no-editable
 
       - name: Check version matches tag
         run: |
@@ -50,7 +50,9 @@ jobs:
       - name: Check installed wheel
         run: |
           uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl
-          .venv/bin/python -I -c 'from verdog_runtime.interpreter import Dispatcher; from verdog_runtime.cli import parse_arguments'
+          .venv/bin/python -I -c 'from verdog_runtime.interpreter import Dispatcher; from verdog_runtime.cli import parse_arguments; from verdog.main import main; import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ("pyverdog", "verdog_compiler", "verdog_core"))'
+          .venv/bin/python -I -m verdog.main --help
+          .venv/bin/verdog --help
 
       - name: Upload distributions
         uses: actions/upload-artifact@v4

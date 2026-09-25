@@ -5,6 +5,7 @@
   "venv": ".venv",
   "include": [
     "verdog_runtime",
+    "verdog",
     "tests"
   ],
   "exclude": [

@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Check version matches tag
+        run: |
+          uv run --no-sync python - <<'PYTHON'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Version mismatch: pyproject.toml={version}, tag={tag}")
+          PYTHON
+
+      - name: Test
+        run: uv run --no-sync pytest
+
+      - name: Type check
+        run: uv run --no-sync pyright
+
+      - name: Build wheel and source distribution
+        run: uv build
+
+      - name: Check installed wheel
+        run: |
+          uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl
+          .venv/bin/python -I -c 'from verdog_runtime.interpreter import Dispatcher; from verdog_runtime.cli import parse_arguments'
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.repository == 'verdog-ai/verdog-runtime'
+    environment:
+      name: pypi
+      url: https://pypi.org/project/verdog-runtime/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

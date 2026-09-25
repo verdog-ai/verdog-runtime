@@ -1,0 +1,37 @@
+{
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.12",
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    "verdog_runtime",
+    "tests"
+  ],
+  "exclude": [
+    ".venv",
+    "build",
+    "dist",
+    "**/__pycache__"
+  ],
+  "reportMissingImports": "error",
+  "reportMissingModuleSource": "error",
+  "reportMissingTypeStubs": "error",
+  "reportUnknownVariableType": "error",
+  "reportUnknownParameterType": "error",
+  "reportUnknownArgumentType": "error",
+  "reportUnknownLambdaType": "error",
+  "reportUnknownMemberType": "error",
+  "reportUntypedFunctionDecorator": "error",
+  "reportUntypedClassDecorator": "error",
+  "reportPrivateImportUsage": "error",
+  "reportImplicitOverride": "error",
+  "reportUnusedImport": "error",
+  "reportUnusedVariable": "error",
+  "reportDuplicateImport": "error",
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "reportAssertAlwaysTrue": "error",
+  "reportUnreachable": "error",
+  "reportInvalidTypeVarUse": "error",
+  "reportInvalidTypeForm": "error",
+  "stubPath": "typings"
+}

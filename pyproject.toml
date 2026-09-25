@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "verdog-runtime"
+version = "0.1.0"
+description = "The Verdog workflow runtime, shared by every generated project."
+readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = ["cloudpickle>=3.1.2", "typing-extensions>=4.13", "tyro>=1", "tabulate>=0.10"]
+
+[project.urls]
+Repository = "https://github.com/verdog-ai/verdog-runtime"
+Documentation = "https://github.com/verdog-ai/verdog-website/tree/main/site"
+
+[dependency-groups]
+dev = ["pytest", "pyright==1.1.411", "types-tabulate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["verdog_runtime*"]
+
+[tool.setuptools.package-data]
+verdog_runtime = ["py.typed"]

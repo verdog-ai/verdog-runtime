@@ -10,7 +10,7 @@ from types import ModuleType
 from typing import NoReturn, cast
 
 import pytest
-import verdog_runtime.interpreter.execution as execution_module
+
 from verdog_runtime._run_store import RunStatus, RunStore, RunStoreError
 from verdog_runtime.agents import (
     AgentReply,
@@ -45,7 +45,11 @@ from verdog_runtime.declarations.ids import (
     NodeId,
     ProviderSessionId,
 )
-from verdog_runtime.interpreter import CheckpointPolicy, Dispatcher, SessionPolicy
+from verdog_runtime.interpreter import (
+    CheckpointPolicy,
+    Dispatcher,
+    SessionPolicy,
+)
 from verdog_runtime.interpreter._continuation import (
     GraphFrameSnapshot,
     decode_continuation,
@@ -73,12 +77,12 @@ def _register_workflow(
     graph: GraphDefinition[int, int, None, object],
     /,
     *,
-    configuration: WorkflowConfiguration = WorkflowConfiguration(),
+    configuration: WorkflowConfiguration | None = None,
     sessions: tuple[AgentSessionDefinition, ...] = (),
 ) -> WorkflowDefinition[int, int, None, object]:
     module_name = f"runtime_test_lifecycle_{next(_module_ids)}"
     module = ModuleType(module_name)
-    setattr(module, "definition", lambda: SubroutineDefinition(graph=graph))
+    module.__dict__["definition"] = lambda: SubroutineDefinition(graph=graph)
     sys.modules[module_name] = module
     return WorkflowDefinition(
         id=GraphId(f"{graph.id}_workflow"),
@@ -88,13 +92,17 @@ def _register_workflow(
             definition_module=module_name,
             params_types={(".", graph.id): type(None)},
             profile_arguments={
-                parameter.id: parameter.id for parameter in graph.profile_parameters
+                parameter.id: parameter.id
+                for parameter in graph.profile_parameters
             },
             session_arguments={
-                parameter.id: parameter.id for parameter in graph.session_parameters
+                parameter.id: parameter.id
+                for parameter in graph.session_parameters
             },
         ),
-        configuration=configuration,
+        configuration=(
+            WorkflowConfiguration() if configuration is None else configuration
+        ),
         sessions=sessions,
     )
 
@@ -252,25 +260,27 @@ def _state_artifacts(output: Path, checkpoint: int) -> tuple[Path, ...]:
     )
 
 
-def test_fork_uses_selected_checkpoint_and_rebases_artifacts(tmp_path: Path) -> None:
+def test_fork_uses_selected_checkpoint_and_rebases_artifacts(
+    tmp_path: Path,
+) -> None:
     project, definition, control, source = _interrupted_source(tmp_path)
     source_store = RunStore.open(source)
     source_manifest = source_store.manifest()
     source_checkpoint_count = source_manifest.checkpoints.count
-    (source / "later.txt").write_text("outside the checkpoint", encoding="utf-8")
+    (source / "later.txt").write_text(
+        "outside the checkpoint", encoding="utf-8"
+    )
     control.fail_last = False
 
     control.events.clear()
     control.marker = "forked-from-one"
     first_target = tmp_path / "runs" / "fork-one"
-    first_result = (
-        Dispatcher(project_root=project).fork(
-            definition,
-            source_output_dir=source,
-            checkpoint=2,
-            output_dir=first_target,
-            sessions=SessionPolicy.FRESH,
-        )
+    first_result = Dispatcher(project_root=project).fork(
+        definition,
+        source_output_dir=source,
+        checkpoint=2,
+        output_dir=first_target,
+        sessions=SessionPolicy.FRESH,
     )
 
     assert first_result.output == 13
@@ -286,26 +296,25 @@ def test_fork_uses_selected_checkpoint_and_rebases_artifacts(tmp_path: Path) -> 
     assert first_manifest.parent.arguments == "checkpoint"
     assert first_manifest.launch.workflow_arguments == ("--input.value", "10")
     assert all(
-        path.is_relative_to(first_target) for path in _state_artifacts(first_target, 1)
+        path.is_relative_to(first_target)
+        for path in _state_artifacts(first_target, 1)
     )
-    assert (
-        first_target / "first" / "000001" / "first.txt"
-    ).read_text("utf-8") == "source"
-    assert (
-        first_target / "second" / "000001" / "second.txt"
-    ).read_text("utf-8") == "forked-from-one"
+    assert (first_target / "first" / "000001" / "first.txt").read_text(
+        "utf-8"
+    ) == "source"
+    assert (first_target / "second" / "000001" / "second.txt").read_text(
+        "utf-8"
+    ) == "forked-from-one"
 
     control.events.clear()
     control.marker = "must-not-run-second"
     second_target = tmp_path / "runs" / "fork-two"
-    second_result = (
-        Dispatcher(project_root=project).fork(
-            definition,
-            source_output_dir=source,
-            checkpoint=3,
-            output_dir=second_target,
-            sessions=SessionPolicy.FRESH,
-        )
+    second_result = Dispatcher(project_root=project).fork(
+        definition,
+        source_output_dir=source,
+        checkpoint=3,
+        output_dir=second_target,
+        sessions=SessionPolicy.FRESH,
     )
 
     assert second_result.output == 13
@@ -318,10 +327,13 @@ def test_fork_uses_selected_checkpoint_and_rebases_artifacts(tmp_path: Path) -> 
         path.is_relative_to(second_target)
         for path in _state_artifacts(second_target, 1)
     )
+    assert (second_target / "second" / "000001" / "second.txt").read_text(
+        "utf-8"
+    ) == "source"
     assert (
-        second_target / "second" / "000001" / "second.txt"
-    ).read_text("utf-8") == "source"
-    assert RunStore.open(source).manifest().checkpoints.count == source_checkpoint_count
+        RunStore.open(source).manifest().checkpoints.count
+        == source_checkpoint_count
+    )
 
 
 @pytest.mark.parametrize("operation", ("resume", "fork"))
@@ -364,7 +376,9 @@ def test_resume_and_fork_reject_changed_published_artifacts(
     assert not target.exists()
 
 
-def test_resume_reuses_outputs_and_preserves_uncommitted_files(tmp_path: Path) -> None:
+def test_resume_reuses_outputs_and_preserves_uncommitted_files(
+    tmp_path: Path,
+) -> None:
     project, definition, control, source = _interrupted_source(tmp_path)
     first = source / "first" / "000001" / "first.txt"
     original_inode = first.stat().st_ino
@@ -373,14 +387,18 @@ def test_resume_reuses_outputs_and_preserves_uncommitted_files(tmp_path: Path) -
     control.fail_last = False
     control.events.clear()
 
-    result = Dispatcher(project_root=project).resume(definition, output_dir=source)
+    result = Dispatcher(project_root=project).resume(
+        definition, output_dir=source
+    )
 
     assert result.output == 13
     assert [event[0] for event in control.events] == ["last"]
     assert first.stat().st_ino == original_inode
     assert first.read_text("utf-8") == "source"
     assert uncommitted.read_text("utf-8") == "interrupted attempt"
-    assert (source / "last" / "000002" / "last.txt").read_text("utf-8") == "source"
+    assert (source / "last" / "000002" / "last.txt").read_text(
+        "utf-8"
+    ) == "source"
     assert not tuple((source / ".verdog/checkpoints").glob("*/artifacts"))
 
 
@@ -399,32 +417,38 @@ def test_materialized_fork_resumes_without_source_files(tmp_path: Path) -> None:
     control.fail_last = False
     control.events.clear()
 
-    result = Dispatcher(project_root=project).resume(definition, output_dir=target)
+    result = Dispatcher(project_root=project).resume(
+        definition, output_dir=target
+    )
 
     assert result.output == 13
     assert [event[0] for event in control.events] == ["last"]
-    assert (target / "first" / "000001" / "first.txt").read_text("utf-8") == "source"
-    assert (target / "second" / "000001" / "second.txt").read_text("utf-8") == "source"
+    assert (target / "first" / "000001" / "first.txt").read_text(
+        "utf-8"
+    ) == "source"
+    assert (target / "second" / "000001" / "second.txt").read_text(
+        "utf-8"
+    ) == "source"
     assert not tuple((target / ".verdog/checkpoints").glob("*/artifacts"))
 
 
-def test_restart_creates_lineage_but_resets_workflow_state(tmp_path: Path) -> None:
+def test_restart_creates_lineage_but_resets_workflow_state(
+    tmp_path: Path,
+) -> None:
     project, definition, control, source = _interrupted_source(tmp_path)
     source_manifest = RunStore.open(source).manifest()
     control.fail_last = False
 
     control.events.clear()
     fresh_target = tmp_path / "runs" / "restart-fresh"
-    fresh_result = (
-        Dispatcher(project_root=project).restart(
-            definition,
-            20,
-            source_output_dir=source,
-            output_dir=fresh_target,
-            sessions=SessionPolicy.FRESH,
-            workflow_arguments=("--input.value", "10"),
-            arguments_mode="reused",
-        )
+    fresh_result = Dispatcher(project_root=project).restart(
+        definition,
+        20,
+        source_output_dir=source,
+        output_dir=fresh_target,
+        sessions=SessionPolicy.FRESH,
+        workflow_arguments=("--input.value", "10"),
+        arguments_mode="reused",
     )
 
     assert fresh_result.output == 23
@@ -443,23 +467,25 @@ def test_restart_creates_lineage_but_resets_workflow_state(tmp_path: Path) -> No
 
     # Simulate a newer serializable boundary whose nested/provider sessions
     # cannot be branched. The default must use the previous usable anchor.
-    latest_manifest = RunStore.open(source).checkpoint_directory(3) / "manifest.json"
-    latest = cast(dict[str, object], json.loads(latest_manifest.read_text("utf-8")))
+    latest_manifest = (
+        RunStore.open(source).checkpoint_directory(3) / "manifest.json"
+    )
+    latest = cast(
+        dict[str, object], json.loads(latest_manifest.read_text("utf-8"))
+    )
     latest["fork_with_branch_available"] = False
     latest_manifest.write_text(json.dumps(latest), encoding="utf-8")
 
     control.events.clear()
     branch_target = tmp_path / "runs" / "restart-branch"
-    branch_result = (
-        Dispatcher(project_root=project).restart(
-            definition,
-            30,
-            source_output_dir=source,
-            output_dir=branch_target,
-            sessions=SessionPolicy.BRANCH,
-            workflow_arguments=("--input.value", "30"),
-            arguments_mode="overridden",
-        )
+    branch_result = Dispatcher(project_root=project).restart(
+        definition,
+        30,
+        source_output_dir=source,
+        output_dir=branch_target,
+        sessions=SessionPolicy.BRANCH,
+        workflow_arguments=("--input.value", "30"),
+        arguments_mode="overridden",
     )
 
     assert branch_result.output == 33
@@ -561,8 +587,12 @@ def _session_workflow(
         exit=exit_,
         failure=PortDefinition(id=NodeId("failure")),
         nodes=(first, gate_node, second),
-        profile_parameters=(AgentProfileParameter(id=profile_id, name="profile"),),
-        session_parameters=(AgentSessionParameter(id=session_id, name="conversation"),),
+        profile_parameters=(
+            AgentProfileParameter(id=profile_id, name="profile"),
+        ),
+        session_parameters=(
+            AgentSessionParameter(id=session_id, name="conversation"),
+        ),
         edges=(
             EdgeDefinition(
                 id=EdgeId("enter_first"),
@@ -582,12 +612,16 @@ def _session_workflow(
                 target=second.id,
                 visit=VisitDefinition(implementation=agent),
             ),
-            EdgeDefinition(id=EdgeId("second_exit"), source=second.id, target=exit_.id),
+            EdgeDefinition(
+                id=EdgeId("second_exit"), source=second.id, target=exit_.id
+            ),
         ),
     )
     return _register_workflow(
         graph,
-        configuration=WorkflowConfiguration(profile_arguments={profile_id: invoker}),
+        configuration=WorkflowConfiguration(
+            profile_arguments={profile_id: invoker}
+        ),
         sessions=(
             AgentSessionDefinition(
                 id=session_id,
@@ -598,7 +632,9 @@ def _session_workflow(
     )
 
 
-def test_fork_applies_branch_and_fresh_conversation_policies(tmp_path: Path) -> None:
+def test_fork_applies_branch_and_fresh_conversation_policies(
+    tmp_path: Path,
+) -> None:
     project = _project(tmp_path)
     invoker = _BranchingInvoker()
     control = _LifecycleControl()
@@ -616,41 +652,44 @@ def test_fork_applies_branch_and_fresh_conversation_policies(tmp_path: Path) -> 
         )
     assert len(invoker.requests) == 1
     assert invoker.requests[0].provider_session_id is None
-    assert invoker.requests[0].provider_session_action is AgentSessionAction.CONTINUE
+    assert (
+        invoker.requests[0].provider_session_action
+        is AgentSessionAction.CONTINUE
+    )
     source_store = RunStore.open(source)
     assert source_store.checkpoints()[1].fork_with_branch_available
     control.fail_last = False
 
     branch_target = tmp_path / "runs" / "session-branch"
-    branch_result = (
-        Dispatcher(project_root=project).fork(
-            definition,
-            source_output_dir=source,
-            checkpoint=2,
-            output_dir=branch_target,
-            sessions=SessionPolicy.BRANCH,
-        )
+    branch_result = Dispatcher(project_root=project).fork(
+        definition,
+        source_output_dir=source,
+        checkpoint=2,
+        output_dir=branch_target,
+        sessions=SessionPolicy.BRANCH,
     )
 
     assert branch_result.output == 4
     branch_request = invoker.requests[1]
-    assert branch_request.provider_session_id == ProviderSessionId("provider-session-1")
+    assert branch_request.provider_session_id == ProviderSessionId(
+        "provider-session-1"
+    )
     assert branch_request.provider_session_action is AgentSessionAction.FORK
     branch_snapshot = decode_continuation(
         RunStore.open(branch_target).checkpoint_shard(1, "runtime.pkl")
     )
-    assert branch_snapshot.sessions[0].provider_session_id == "provider-session-1"
+    assert (
+        branch_snapshot.sessions[0].provider_session_id == "provider-session-1"
+    )
     assert branch_snapshot.sessions[0].copy_on_write
 
     fresh_target = tmp_path / "runs" / "session-fresh"
-    fresh_result = (
-        Dispatcher(project_root=project).fork(
-            definition,
-            source_output_dir=source,
-            checkpoint=2,
-            output_dir=fresh_target,
-            sessions=SessionPolicy.FRESH,
-        )
+    fresh_result = Dispatcher(project_root=project).fork(
+        definition,
+        source_output_dir=source,
+        checkpoint=2,
+        output_dir=fresh_target,
+        sessions=SessionPolicy.FRESH,
     )
 
     assert fresh_result.output == 4
@@ -669,12 +708,19 @@ def test_resume_and_fork_reject_exact_compatibility_drift_before_decode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project, definition, _control, source = _interrupted_source(tmp_path)
-    (project / "src" / "workflow.py").write_text("VERSION = 2\n", encoding="utf-8")
+    (project / "src" / "workflow.py").write_text(
+        "VERSION = 2\n", encoding="utf-8"
+    )
 
     def unexpected_decode(_payload: bytes) -> NoReturn:
-        raise AssertionError("compatibility drift must be rejected before decoding")
+        raise AssertionError(
+            "compatibility drift must be rejected before decoding"
+        )
 
-    monkeypatch.setattr(execution_module, "decode_continuation", unexpected_decode)
+    monkeypatch.setattr(
+        "verdog_runtime.interpreter._continuation.decode_continuation",
+        unexpected_decode,
+    )
 
     with pytest.raises(ValueError, match=r"changed source_sha256$"):
         (
@@ -706,22 +752,21 @@ def test_recorded_run_without_checkpointing_skips_compatibility_fingerprint(
     definition = _lifecycle_workflow(control)
 
     def unexpected_fingerprint(_project: Path) -> NoReturn:
-        raise AssertionError("a non-checkpointed run does not need a fingerprint")
+        raise AssertionError(
+            "a non-checkpointed run does not need a fingerprint"
+        )
 
     monkeypatch.setattr(
-        execution_module,
-        "checkpoint_compatibility",
+        "verdog_runtime._checkpoint_compatibility.checkpoint_compatibility",
         unexpected_fingerprint,
     )
     output = tmp_path / "runs" / "recorded"
-    result = (
-        Dispatcher(project_root=project).run(
-            definition,
-            10,
-            output_dir=output,
-            checkpointing=CheckpointPolicy.OFF,
-            _record_run=True,
-        )
+    result = Dispatcher(project_root=project).run(
+        definition,
+        10,
+        output_dir=output,
+        checkpointing=CheckpointPolicy.OFF,
+        _record_run=True,
     )
 
     assert result.output == 13

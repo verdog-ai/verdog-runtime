@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+
 from verdog_runtime.declarations import (
     Agent,
     AgentProfileId,
@@ -156,7 +157,9 @@ DURABLE_VISIT: CallVisitDefinition[
         ),
     ),
 )
-def test_durable_visit_is_valid_only_for_call_operations(operation: object) -> None:
+def test_durable_visit_is_valid_only_for_call_operations(
+    operation: object,
+) -> None:
     validate_graph(_graph(_node(operation), DURABLE_VISIT))
 
 
@@ -219,12 +222,12 @@ def test_plain_visit_is_rejected_for_call_operations() -> None:
     ):
         validate_graph(
             _graph(
-            _node(
-                WorkflowCall(
-                    definition_id=GraphId("child"),
-                    definition_module="sample.child",
-                )
-            ),
+                _node(
+                    WorkflowCall(
+                        definition_id=GraphId("child"),
+                        definition_module="sample.child",
+                    )
+                ),
                 VisitDefinition(implementation=_legacy),
             )
         )

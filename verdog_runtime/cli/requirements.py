@@ -2,14 +2,13 @@
 
 from collections.abc import Iterable
 
-from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
-from packaging.utils import canonicalize_name
+import packaging.requirements
+import packaging.specifiers
+import packaging.utils
 
 
 def parse_requirements(source: str, path: str) -> tuple[str, ...]:
     """Parse one requirement per nonblank, non-comment line."""
-
     result: list[str] = []
     seen: dict[str, int] = {}
     for line_number, raw in enumerate(source.splitlines(), 1):
@@ -17,10 +16,14 @@ def parse_requirements(source: str, path: str) -> tuple[str, ...]:
         if not value or value.startswith("#"):
             continue
         if value.startswith("-"):
-            raise ValueError(f"{path}:{line_number}: pip directives are not supported")
+            raise ValueError(
+                f"{path}:{line_number}: pip directives are not supported"
+            )
         try:
-            name = canonicalize_name(Requirement(value).name)
-        except InvalidRequirement as error:
+            name = packaging.utils.canonicalize_name(
+                packaging.requirements.Requirement(value).name
+            )
+        except packaging.requirements.InvalidRequirement as error:
             raise ValueError(
                 f"{path}:{line_number}: invalid PEP 508 requirement: {value}"
             ) from error
@@ -36,15 +39,14 @@ def parse_requirements(source: str, path: str) -> tuple[str, ...]:
 
 def canonical_requirements(values: Iterable[str], /) -> tuple[str, ...]:
     """Serialize requirements exactly as the catalogue service does."""
-
     normalized: list[str] = []
     names: set[str] = set()
     for value in values:
         try:
-            requirement = Requirement(value)
-        except InvalidRequirement as error:
+            requirement = packaging.requirements.Requirement(value)
+        except packaging.requirements.InvalidRequirement as error:
             raise ValueError(f"invalid PEP 508 requirement: {value}") from error
-        name = canonicalize_name(requirement.name)
+        name = packaging.utils.canonicalize_name(requirement.name)
         if name in names:
             raise ValueError(f"requirement {name} is declared more than once")
         names.add(name)
@@ -54,11 +56,12 @@ def canonical_requirements(values: Iterable[str], /) -> tuple[str, ...]:
 
 def canonical_python_specifier(value: str, /) -> str:
     """Serialize a Python constraint exactly as the catalogue service does."""
-
     try:
-        return str(SpecifierSet(value))
-    except InvalidSpecifier as error:
-        raise ValueError(f"invalid Python compatibility constraint: {value}") from error
+        return str(packaging.specifiers.SpecifierSet(value))
+    except packaging.specifiers.InvalidSpecifier as error:
+        raise ValueError(
+            f"invalid Python compatibility constraint: {value}"
+        ) from error
 
 
 __all__ = [

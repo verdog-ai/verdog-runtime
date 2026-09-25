@@ -2,40 +2,28 @@
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
+import datetime
 import json
 import os
+import pathlib
 import sys
+import types
+import uuid
 from collections.abc import Callable, Generator, Sequence
-from contextlib import chdir, contextmanager, nullcontext, redirect_stdout
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
-from pathlib import Path
-from types import ModuleType
 from typing import Literal, TypeVar, cast
-from uuid import uuid4
 
-from ._definitions import load_definition
-from ._lifecycle import (
-    ArgumentMode,
-    LifecycleCommand,
-    Operation,
-    decode_lifecycle_command,
+from verdog_runtime import (
+    _definitions,
+    _run_model,
+    _run_store,
+    cli,
+    declarations,
+    interpreter,
 )
-from ._run_model import RUN_HISTORY_SCHEMA_VERSION
-from ._run_store import (
-    RunManifest,
-    RunStore,
-    RunStatus,
-    load_run_manifest,
-    run_is_active,
-)
-from .cli import WorkflowArguments, parse_arguments
-from .declarations import (
-    WorkflowConfiguration,
-    WorkflowDefinition,
-)
-from .declarations.ids import GraphId
-from .interpreter import CheckpointPolicy, Dispatcher, SessionPolicy
+from verdog_runtime import _lifecycle as lifecycle
+from verdog_runtime.declarations import ids
 
 RUN_DIRECTORY = ".verdog/runs"
 InputT = TypeVar("InputT")
@@ -44,46 +32,48 @@ ParamsT = TypeVar("ParamsT")
 ScopeT = TypeVar("ScopeT")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _RunRequest:
-    root: Path
+    root: pathlib.Path
     definition_id: str
     definition_module: str
-    requested_output: Path | None
+    requested_output: pathlib.Path | None
     arguments: tuple[str, ...]
-    checkpointing: CheckpointPolicy
+    checkpointing: interpreter.CheckpointPolicy
 
 
-@dataclass(slots=True)
+@dataclasses.dataclass(slots=True)
 class _LifecycleState:
-    target_output: Path | None = None
-    source: RunManifest | None = None
-    mode: ArgumentMode | None = None
+    target_output: pathlib.Path | None = None
+    source: _run_store.RunManifest | None = None
+    mode: lifecycle.ArgumentMode | None = None
     problem: BaseException | None = None
     outcome: object = None
-    manifest: RunManifest | None = None
+    manifest: _run_store.RunManifest | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _PreparedLifecycle:
-    request: LifecycleCommand
-    definition: WorkflowDefinition[object, object, object, object]
-    parsed: WorkflowArguments[object, object]
-    source: RunManifest
-    source_store: RunStore
-    mode: ArgumentMode
+    request: lifecycle.LifecycleCommand
+    definition: declarations.WorkflowDefinition[object, object, object, object]
+    parsed: cli.WorkflowArguments[object, object]
+    source: _run_store.RunManifest
+    source_store: _run_store.RunStore
+    mode: lifecycle.ArgumentMode
     selected_arguments: tuple[str, ...]
-    target_output: Path
+    target_output: pathlib.Path
 
 
 def _arguments(
-    definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
-    declaration: ModuleType,
+    definition: declarations.WorkflowDefinition[
+        InputT, OutputT, ParamsT, ScopeT
+    ],
+    declaration: types.ModuleType,
     arguments: tuple[str, ...],
     /,
 ) -> tuple[
-    WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
-    WorkflowArguments[InputT, object],
+    declarations.WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
+    cli.WorkflowArguments[InputT, object],
 ]:
     options_value: object = getattr(declaration, "RuntimeOptions", None)
     configure_value: object = getattr(declaration, "configure", None)
@@ -92,7 +82,7 @@ def _arguments(
     options_type: type[object] = options_value
     if not callable(configure_value):
         raise RuntimeError("workflow declaration configure is not callable")
-    parsed = parse_arguments(
+    parsed = cli.parse_arguments(
         definition.input_type,
         arguments,
         params_types=definition.params_types,
@@ -105,20 +95,26 @@ def _arguments(
         )
     configure = cast(Callable[[object], object], configure_value)
     configuration = configure(parsed.runtime)
-    if not isinstance(configuration, WorkflowConfiguration):
+    if not isinstance(configuration, declarations.WorkflowConfiguration):
         raise RuntimeError(
-            "workflow declaration configure() did not return WorkflowConfiguration"
+            "workflow declaration configure() did not return "
+            "WorkflowConfiguration"
         )
-    return replace(definition, configuration=configuration), parsed
+    return dataclasses.replace(definition, configuration=configuration), parsed
 
 
-def _output_directory(root: Path, requested: Path | None, workflow_id: str) -> Path:
+def _output_directory(
+    root: pathlib.Path, requested: pathlib.Path | None, workflow_id: str
+) -> pathlib.Path:
     output = requested
     if output is None:
-        started = datetime.now(UTC)
+        started = datetime.datetime.now(datetime.UTC)
         workflow = workflow_id.rsplit(".", 1)[-1]
         output = (
-            root / RUN_DIRECTORY / workflow / f"{started:%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
+            root
+            / RUN_DIRECTORY
+            / workflow
+            / f"{started:%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
         )
     output = output.resolve()
     if output.exists():
@@ -130,14 +126,16 @@ def _output_directory(root: Path, requested: Path | None, workflow_id: str) -> P
 
 
 def _run(request: _RunRequest, /) -> int:
-    with chdir(request.root):
+    with contextlib.chdir(request.root):
         definition, parsed = _configured_definition(
             request.root,
             request.definition_id,
             request.definition_module,
             request.arguments,
         )
-        output = _output_directory(request.root, request.requested_output, definition.id)
+        output = _output_directory(
+            request.root, request.requested_output, definition.id
+        )
         try:
             metadata = cast(
                 object,
@@ -146,25 +144,27 @@ def _run(request: _RunRequest, /) -> int:
         except (OSError, ValueError):
             metadata = None
         project = (
-            cast(dict[str, object], metadata) if isinstance(metadata, dict) else {}
+            cast(dict[str, object], metadata)
+            if isinstance(metadata, dict)
+            else {}
         )
         revision = project.get("generated_from")
         suffix = (
-            f" at {revision[:12]}…" if isinstance(revision, str) and revision else ""
+            f" at {revision[:12]}…"
+            if isinstance(revision, str) and revision
+            else ""
         )
         print(f"Running {definition.id}{suffix}")
         try:
-            outcome = (
-                Dispatcher(project_root=request.root).run(
-                    definition,
-                    parsed.input,
-                    output_dir=output,
-                    params=parsed.params,
-                    runtime_options=parsed.runtime,
-                    checkpointing=request.checkpointing,
-                    workflow_arguments=request.arguments,
-                    _record_run=True,
-                )
+            outcome = interpreter.Dispatcher(project_root=request.root).run(
+                definition,
+                parsed.input,
+                output_dir=output,
+                params=parsed.params,
+                runtime_options=parsed.runtime,
+                checkpointing=request.checkpointing,
+                workflow_arguments=request.arguments,
+                _record_run=True,
             )
         except Exception as error:  # noqa: BLE001 - the project's own failure
             print(f"verdog: the workflow failed: {error}", file=sys.stderr)
@@ -176,22 +176,22 @@ def _run(request: _RunRequest, /) -> int:
 
 
 def _configured_definition(
-    root: Path,
+    root: pathlib.Path,
     definition_id: str,
     definition_module: str,
     arguments: tuple[str, ...],
     /,
 ) -> tuple[
-    WorkflowDefinition[object, object, object, object],
-    WorkflowArguments[object, object],
+    declarations.WorkflowDefinition[object, object, object, object],
+    cli.WorkflowArguments[object, object],
 ]:
-    definition_type: type[WorkflowDefinition[object, object, object, object]] = (
-        WorkflowDefinition
-    )
-    definition, declaration = load_definition(
+    definition_type: type[
+        declarations.WorkflowDefinition[object, object, object, object]
+    ] = declarations.WorkflowDefinition
+    definition, declaration = _definitions.load_definition(
         root,
         definition_module,
-        GraphId(definition_id),
+        ids.GraphId(definition_id),
         definition_type,
         lambda loaded: loaded.id,
     )
@@ -199,10 +199,10 @@ def _configured_definition(
 
 
 def _require_lifecycle_contract(
-    request: LifecycleCommand,
-    source: RunManifest,
+    request: lifecycle.LifecycleCommand,
+    source: _run_store.RunManifest,
     /,
-) -> tuple[ArgumentMode, tuple[str, ...]]:
+) -> tuple[lifecycle.ArgumentMode, tuple[str, ...]]:
     mode = request.arguments_mode
     if request.checkpoint is not None and request.checkpoint <= 0:
         raise RuntimeError("internal lifecycle checkpoint must be positive")
@@ -226,40 +226,50 @@ def _require_lifecycle_contract(
         if request.sessions == "branch" and request.checkpoint is None:
             raise RuntimeError("a branching restart needs a session checkpoint")
         if request.sessions == "fresh" and request.checkpoint is not None:
-            raise RuntimeError("a fresh restart must not name a session checkpoint")
+            raise RuntimeError(
+                "a fresh restart must not name a session checkpoint"
+            )
 
     recorded = source.launch.workflow_arguments
     if mode in {"checkpoint", "reused"}:
         if request.arguments != recorded:
-            raise RuntimeError("recorded workflow arguments changed during launch")
+            raise RuntimeError(
+                "recorded workflow arguments changed during launch"
+            )
         return mode, recorded
     return mode, request.arguments
 
 
-def _effective_status(manifest: RunManifest, output: Path, /) -> RunStatus:
-    if manifest.status is RunStatus.RUNNING and not run_is_active(output):
-        return RunStatus.INTERRUPTED
+def _effective_status(
+    manifest: _run_store.RunManifest, output: pathlib.Path, /
+) -> _run_store.RunStatus:
+    if (
+        manifest.status is _run_store.RunStatus.RUNNING
+        and not _run_store.run_is_active(output)
+    ):
+        return _run_store.RunStatus.INTERRUPTED
     return manifest.status
 
 
-@contextmanager
+@contextlib.contextmanager
 def _machine_output() -> Generator[None]:
-    """Keep stdout as one JSON document, including across native child writes."""
-
+    """Keep stdout as one JSON document despite native child writes."""
     try:
-        # Native code and subprocesses inherit the process descriptors, even when
-        # Python's ``sys.stdout`` has been replaced by a capture or logging stream.
+        # Native code and subprocesses inherit the process descriptors, even
+        # when
+        # Python's ``sys.stdout`` has been replaced by a capture or logging
+        # stream.
         os.fstat(1)
         os.fstat(2)
     except OSError:
-        with redirect_stdout(sys.stderr):
+        with contextlib.redirect_stdout(sys.stderr):
             yield
         return
     sys.stdout.flush()
     duplicate = os.dup(1)
     try:
         os.dup2(2, 1)
-        with redirect_stdout(sys.stderr):
+        with contextlib.redirect_stdout(sys.stderr):
             yield
         sys.stderr.flush()
     finally:
@@ -283,9 +293,11 @@ def _error_detail(error: BaseException, /) -> dict[str, object]:
     return detail
 
 
-def _error_document(operation: Operation, error: BaseException, /) -> dict[str, object]:
+def _error_document(
+    operation: lifecycle.Operation, error: BaseException, /
+) -> dict[str, object]:
     return {
-        "schema_version": RUN_HISTORY_SCHEMA_VERSION,
+        "schema_version": _run_model.RUN_HISTORY_SCHEMA_VERSION,
         "operation": operation,
         "status": "error",
         "error": _error_detail(error),
@@ -293,7 +305,7 @@ def _error_document(operation: Operation, error: BaseException, /) -> dict[str, 
 
 
 def _operation_document(
-    request: LifecycleCommand,
+    request: lifecycle.LifecycleCommand,
     state: _LifecycleState,
     /,
 ) -> dict[str, object]:
@@ -303,7 +315,7 @@ def _operation_document(
     assert state.target_output is not None
     status = _effective_status(state.manifest, state.target_output)
     document: dict[str, object] = {
-        "schema_version": RUN_HISTORY_SCHEMA_VERSION,
+        "schema_version": _run_model.RUN_HISTORY_SCHEMA_VERSION,
         "operation": request.operation,
         "status": status.value,
         "source_run_id": state.source.id,
@@ -322,10 +334,11 @@ def _dispatch_lifecycle(
     /,
 ) -> object:
     request = prepared.request
-    dispatcher = Dispatcher(project_root=request.root)
+    dispatcher = interpreter.Dispatcher(project_root=request.root)
     if request.operation == "resume":
         print(
-            f"Resuming {prepared.definition.id} from {prepared.source.directory_name}"
+            f"Resuming {prepared.definition.id} from "
+            f"{prepared.source.directory_name}"
         )
         return dispatcher.resume(
             prepared.definition,
@@ -336,7 +349,8 @@ def _dispatch_lifecycle(
 
     if request.operation == "restart":
         print(
-            f"Restarting {prepared.definition.id} from {prepared.source.directory_name}"
+            f"Restarting {prepared.definition.id} from "
+            f"{prepared.source.directory_name}"
         )
         return dispatcher.restart(
             prepared.definition,
@@ -344,7 +358,7 @@ def _dispatch_lifecycle(
             source_output_dir=request.source_output,
             output_dir=prepared.target_output,
             _source_store=prepared.source_store,
-            sessions=SessionPolicy(request.sessions),
+            sessions=interpreter.SessionPolicy(request.sessions),
             source_checkpoint=request.checkpoint,
             params=prepared.parsed.params,
             runtime_options=prepared.parsed.runtime,
@@ -353,7 +367,8 @@ def _dispatch_lifecycle(
         )
 
     print(
-        f"Forking {prepared.definition.id} from {prepared.source.directory_name} "
+        f"Forking {prepared.definition.id} "
+        f"from {prepared.source.directory_name} "
         f"checkpoint {request.checkpoint}"
     )
     assert request.checkpoint is not None
@@ -362,20 +377,22 @@ def _dispatch_lifecycle(
         source_output_dir=request.source_output,
         checkpoint=request.checkpoint,
         output_dir=prepared.target_output,
-        sessions=SessionPolicy(request.sessions),
+        sessions=interpreter.SessionPolicy(request.sessions),
         _source_store=prepared.source_store,
     )
 
 
 def _attempt_lifecycle(
-    request: LifecycleCommand,
+    request: lifecycle.LifecycleCommand,
     /,
 ) -> _LifecycleState:
     state = _LifecycleState(
-        target_output=(request.source_output if request.operation == "resume" else None)
+        target_output=(
+            request.source_output if request.operation == "resume" else None
+        )
     )
     try:
-        source_store = RunStore.open(request.source_output)
+        source_store = _run_store.RunStore.open(request.source_output)
         state.source = source_store.manifest()
         state.mode, selected_arguments = _require_lifecycle_contract(
             request,
@@ -388,7 +405,9 @@ def _attempt_lifecycle(
             selected_arguments,
         )
         if state.target_output is None:
-            state.target_output = _output_directory(request.root, None, definition.id)
+            state.target_output = _output_directory(
+                request.root, None, definition.id
+            )
         state.outcome = _dispatch_lifecycle(
             _PreparedLifecycle(
                 request=request,
@@ -410,14 +429,14 @@ def _load_lifecycle_manifest(state: _LifecycleState, /) -> None:
     if state.target_output is None:
         return
     try:
-        state.manifest = load_run_manifest(state.target_output)
+        state.manifest = _run_store.load_run_manifest(state.target_output)
     except Exception as error:  # noqa: BLE001 - preserve the original failure
         if state.problem is None:
             state.problem = error
 
 
 def _has_manifest_response(
-    operation: Operation,
+    operation: lifecycle.Operation,
     state: _LifecycleState,
     /,
 ) -> bool:
@@ -434,7 +453,7 @@ def _has_manifest_response(
 
 
 def _emit_manifest_response(
-    request: LifecycleCommand,
+    request: lifecycle.LifecycleCommand,
     state: _LifecycleState,
     /,
 ) -> None:
@@ -446,7 +465,8 @@ def _emit_manifest_response(
     assert state.target_output is not None
     if state.problem is None:
         print(
-            f"{request.operation.capitalize()} {status}. Outputs: {state.target_output}"
+            f"{request.operation.capitalize()} {status}. Outputs: "
+            f"{state.target_output}"
         )
         print(f"Result: {state.outcome!r}"[:400])
     else:
@@ -458,7 +478,7 @@ def _emit_manifest_response(
 
 
 def _emit_error_response(
-    operation: Operation,
+    operation: lifecycle.Operation,
     problem: BaseException,
     as_json: bool,
     /,
@@ -470,7 +490,7 @@ def _emit_error_response(
 
 
 def _finish_lifecycle(
-    request: LifecycleCommand,
+    request: lifecycle.LifecycleCommand,
     state: _LifecycleState,
     /,
 ) -> None:
@@ -499,11 +519,13 @@ def _lifecycle_exit_status(problem: BaseException | None, /) -> int:
 
 
 def _lifecycle(
-    request: LifecycleCommand,
+    request: lifecycle.LifecycleCommand,
     /,
 ) -> int:
-    output_context = _machine_output() if request.as_json else nullcontext()
-    with chdir(request.root), output_context:
+    output_context = (
+        _machine_output() if request.as_json else contextlib.nullcontext()
+    )
+    with contextlib.chdir(request.root), output_context:
         state = _attempt_lifecycle(request)
     _load_lifecycle_manifest(state)
     _finish_lifecycle(request, state)
@@ -515,7 +537,7 @@ def _lifecycle_main(argv: Sequence[str], /) -> int:
         print("verdog: invalid internal lifecycle invocation", file=sys.stderr)
         return 2
     try:
-        request = decode_lifecycle_command(argv[2])
+        request = lifecycle.decode_lifecycle_command(argv[2])
     except ValueError as error:
         print(f"verdog: {error}", file=sys.stderr)
         return 2
@@ -526,14 +548,16 @@ def _run_main(argv: Sequence[str], /) -> int:
     if len(argv) < 6:
         print("verdog: invalid internal run invocation", file=sys.stderr)
         return 2
-    root = Path(argv[1]).resolve()
-    requested = Path(argv[4]) if argv[4] else None
+    root = pathlib.Path(argv[1]).resolve()
+    requested = pathlib.Path(argv[4]) if argv[4] else None
     prefix = "--verdog-checkpointing="
     if not argv[5].startswith(prefix):
         print("verdog: invalid internal checkpoint policy", file=sys.stderr)
         return 2
     try:
-        checkpointing = CheckpointPolicy(argv[5].removeprefix(prefix))
+        checkpointing = interpreter.CheckpointPolicy(
+            argv[5].removeprefix(prefix)
+        )
     except ValueError:
         print("verdog: invalid internal checkpoint policy", file=sys.stderr)
         return 2
@@ -554,10 +578,13 @@ def _run_main(argv: Sequence[str], /) -> int:
 
 
 def main() -> int:
+    """Dispatch a workflow launch or lifecycle command and return exit code."""
     if len(sys.argv) > 1 and sys.argv[1] == "--verdog-lifecycle":
         return _lifecycle_main(sys.argv)
     return _run_main(sys.argv)
 
 
-if __name__ == "__main__":  # pragma: no cover - exercised through the CLI process
+if (
+    __name__ == "__main__"
+):  # pragma: no cover - exercised through the CLI process
     raise SystemExit(main())

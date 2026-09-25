@@ -6,10 +6,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Never, cast, override
 
-import pytest
 import cloudpickle
+import pytest
 from layout_helpers import legacy_frame_state, legacy_graph_create
 from report_helpers import call_reports, table_rows
+
 from verdog_runtime._run_store import (
     CheckpointKind,
     CheckpointPolicy,
@@ -33,8 +34,18 @@ from verdog_runtime.declarations import (
     WorkflowConfiguration,
     WorkflowDefinition,
 )
-from verdog_runtime.declarations.ids import EdgeId, FeatureId, GraphId, NodeId, RunId
-from verdog_runtime.interpreter import Dispatcher, SessionPolicy, initial_workflow_state
+from verdog_runtime.declarations.ids import (
+    EdgeId,
+    FeatureId,
+    GraphId,
+    NodeId,
+    RunId,
+)
+from verdog_runtime.interpreter import (
+    Dispatcher,
+    SessionPolicy,
+    initial_workflow_state,
+)
 from verdog_runtime.interpreter._continuation import (
     FORMAT_VERSION,
     CallFrameSnapshot,
@@ -166,9 +177,14 @@ def test_continuation_codec_is_versioned_and_digested() -> None:
     assert len(continuation_digest(payload)) == 64
 
     with pytest.raises(ValueError, match="unsupported continuation format"):
-        encode_continuation(replace(snapshot, format_version=FORMAT_VERSION - 1))
+        encode_continuation(
+            replace(snapshot, format_version=FORMAT_VERSION - 1)
+        )
 
-    from verdog_runtime.interpreter._continuation import ParameterSlot, SessionSnapshot
+    from verdog_runtime.interpreter._continuation import (
+        ParameterSlot,
+        SessionSnapshot,
+    )
 
     duplicated_parameters = replace(
         snapshot,
@@ -356,7 +372,9 @@ def test_fork_rebases_run_paths_and_applies_session_policy(
         # Slotted dataclasses encode fields in order. Older pickles have no
         # state entry for the report_path field appended by the new runtime.
         with monkeypatch.context() as legacy:
-            legacy.setattr(GraphFrameSnapshot, "__getstate__", legacy_frame_state)
+            legacy.setattr(
+                GraphFrameSnapshot, "__getstate__", legacy_frame_state
+            )
             payload = encode_continuation(snapshot)
         unnormalized = cast(ContinuationSnapshot, cloudpickle.loads(payload))
         assert not hasattr(unnormalized.frames[0], "report_path")
@@ -372,7 +390,9 @@ def test_fork_rebases_run_paths_and_applies_session_policy(
     )
     branched_frame = cast(GraphFrameSnapshot, branched.frames[0])
     assert branched.run_id == RunId("branch-run")
-    assert branched_frame.entry_input == _PathState(target / "input.txt", external)
+    assert branched_frame.entry_input == _PathState(
+        target / "input.txt", external
+    )
     assert branched_frame.value == target / "value.txt"
     assert branched.sessions[0].provider_session_id == "provider-source"
     assert branched.sessions[0].copy_on_write
@@ -573,17 +593,19 @@ def test_dispatcher_commits_each_completed_boundary(tmp_path: Path) -> None:
     module = ModuleType(module_name)
     module.definition = lambda: SubroutineDefinition(graph=graph)  # type: ignore[attr-defined]
     sys.modules[module_name] = module
-    definition: WorkflowDefinition[object, object, None, object] = WorkflowDefinition(
-        id=GraphId("checkpoint_workflow"),
-        input_type=object,
-        entry=SubroutineCall(
-            definition_id=graph.id,
-            definition_module=module_name,
-            params_types={(".", graph.id): type(None)},
-            profile_arguments={},
-            session_arguments={},
-        ),
-        configuration=WorkflowConfiguration(),
+    definition: WorkflowDefinition[object, object, None, object] = (
+        WorkflowDefinition(
+            id=GraphId("checkpoint_workflow"),
+            input_type=object,
+            entry=SubroutineCall(
+                definition_id=graph.id,
+                definition_module=module_name,
+                params_types={(".", graph.id): type(None)},
+                profile_arguments={},
+                session_arguments={},
+            ),
+            configuration=WorkflowConfiguration(),
+        )
     )
     output = tmp_path / "run"
 
@@ -610,11 +632,15 @@ def test_resume_retries_only_the_unfinished_node(tmp_path: Path) -> None:
     calls: list[str] = []
     fail = True
 
-    def first(input: int, state: Count, _context: object, /) -> Success[int, Count]:
+    def first(
+        input: int, state: Count, _context: object, /
+    ) -> Success[int, Count]:
         calls.append("first")
         return Success(output=input + 1, state=Count(state.value + 1))
 
-    def second(input: int, state: Count, _context: object, /) -> Success[int, Count]:
+    def second(
+        input: int, state: Count, _context: object, /
+    ) -> Success[int, Count]:
         nonlocal fail
         calls.append("second")
         if fail:
@@ -688,7 +714,9 @@ def test_resume_retries_only_the_unfinished_node(tmp_path: Path) -> None:
     assert RunStore.open(output).manifest().status is RunStatus.FAILED
 
     fail = False
-    result = Dispatcher(project_root=tmp_path).resume(definition, output_dir=output)
+    result = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
 
     assert result.output == 3
     assert calls == ["first", "second", "second"]
@@ -740,7 +768,9 @@ class _NestedCallScenario:
             return input + self.evaluations - 1
         return input
 
-    def _child_params(self, context: CallContext[None, None, int, int], /) -> object:
+    def _child_params(
+        self, context: CallContext[None, None, int, int], /
+    ) -> object:
         if self.adapter_mode == "nan":
             return float("nan")
         if self.adapter_mode == "unserializable_request":
@@ -846,7 +876,9 @@ def _nested_workflow(
     catch_child_exception: bool = False,
     adapter_mode: str = "normal",
     unserializable_child_exception: bool = False,
-) -> tuple[WorkflowDefinition[int, int, None, object], list[str], dict[str, bool]]:
+) -> tuple[
+    WorkflowDefinition[int, int, None, object], list[str], dict[str, bool]
+]:
     scenario = _NestedCallScenario(
         adapter_mode=adapter_mode,
         calls=[],
@@ -1171,7 +1203,9 @@ def test_resume_continues_inside_nested_durable_subroutine(
     assert store.manifest().status is RunStatus.INTERRUPTED
     latest = store.manifest().checkpoints.latest_restorable
     assert latest is not None
-    snapshot = decode_continuation(store.checkpoint_shard(latest, "runtime.pkl"))
+    snapshot = decode_continuation(
+        store.checkpoint_shard(latest, "runtime.pkl")
+    )
     assert [type(frame) for frame in snapshot.frames] == [
         GraphFrameSnapshot,
         CallFrameSnapshot,
@@ -1191,15 +1225,22 @@ def test_resume_continues_inside_nested_durable_subroutine(
             if layout == "attempt"
             else output / "call_child/000001"
         )
-        assert call_frame.child_call_path == child_output.relative_to(output).as_posix()
+        assert (
+            call_frame.child_call_path
+            == child_output.relative_to(output).as_posix()
+        )
     child_frame = cast(GraphFrameSnapshot, snapshot.frames[-1])
     child_nodes = (
-        child_output / "graph-nested_active__child" if layout != "inline" else child_output
+        child_output / "graph-nested_active__child"
+        if layout != "inline"
+        else child_output
     )
     assert output / child_frame.call_path == child_nodes
 
     failures["child"] = False
-    result = Dispatcher(project_root=tmp_path).resume(definition, output_dir=output)
+    result = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
 
     assert result.output == 13
     assert calls == [
@@ -1237,16 +1278,17 @@ def test_resume_rejects_a_child_attempt_belonging_to_another_visit(
             return stored
         return replace(
             stored,
-            child_call_path=(
-                "call_child/000002"
-            ),
+            child_call_path=("call_child/000002"),
         )
 
     with monkeypatch.context() as corrupt:
         corrupt.setattr(Dispatcher, "_call_snapshot", wrong_visit)
         with pytest.raises(KeyboardInterrupt, match="nested child interrupted"):
             Dispatcher(project_root=tmp_path).run(
-                definition, 1, output_dir=output, checkpointing=CheckpointPolicy.REQUIRED
+                definition,
+                1,
+                output_dir=output,
+                checkpointing=CheckpointPolicy.REQUIRED,
             )
     before_resume = list(calls)
 
@@ -1289,7 +1331,9 @@ def test_resume_pending_local_call_supersedes_partial_child_activation(
 
     monkeypatch.setattr(Dispatcher, "_checkpoint", interrupt_before_child_entry)
 
-    with pytest.raises(KeyboardInterrupt, match="before child entry checkpoint"):
+    with pytest.raises(
+        KeyboardInterrupt, match="before child entry checkpoint"
+    ):
         Dispatcher(project_root=tmp_path).run(
             definition,
             1,
@@ -1301,7 +1345,9 @@ def test_resume_pending_local_call_supersedes_partial_child_activation(
     latest = store.manifest().checkpoints.latest_restorable
     assert latest is not None
     assert store.checkpoints()[-1].kind is CheckpointKind.CHILD_START
-    snapshot = decode_continuation(store.checkpoint_shard(latest, "runtime.pkl"))
+    snapshot = decode_continuation(
+        store.checkpoint_shard(latest, "runtime.pkl")
+    )
     assert [type(frame) for frame in snapshot.frames] == [
         GraphFrameSnapshot,
         CallFrameSnapshot,
@@ -1316,13 +1362,15 @@ def test_resume_pending_local_call_supersedes_partial_child_activation(
     marker.write_text("interrupted entry", encoding="utf-8")
     assert calls == ["call"]
 
-    result = Dispatcher(project_root=tmp_path).resume(definition, output_dir=output)
+    result = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
 
     assert result.output == 13
     assert calls == ["call", "child_first", "child_second", "call"]
-    assert sorted(path.name for path in (call_directory / "child_enter").iterdir()) == [
-        "000001", "000002"
-    ]
+    assert sorted(
+        path.name for path in (call_directory / "child_enter").iterdir()
+    ) == ["000001", "000002"]
     assert (call_directory / "child_first/000001").is_dir()
     assert marker.read_text("utf-8") == "interrupted entry"
     assert not list(call_directory.glob("attempt-*"))
@@ -1337,6 +1385,7 @@ def test_resume_pending_workflow_call_supersedes_partial_child_attempt(
         _durable_parent,  # pyright: ignore[reportPrivateUsage]
         _resumable_child_project,  # pyright: ignore[reportPrivateUsage]
     )
+
     from verdog_runtime._protocol import EventFrame
     from verdog_runtime.interpreter._calls import Budget
 
@@ -1344,7 +1393,9 @@ def test_resume_pending_workflow_call_supersedes_partial_child_attempt(
         interrupted = False
 
         @override
-        def _forward_child_event(self, event: EventFrame, budget: Budget) -> None:
+        def _forward_child_event(
+            self, event: EventFrame, budget: Budget
+        ) -> None:
             super()._forward_child_event(event, budget)
             if (
                 not self.interrupted
@@ -1389,7 +1440,9 @@ def test_resume_pending_workflow_call_supersedes_partial_child_attempt(
     assert not any(
         name.startswith("children/") for name in store.checkpoint_shards(latest)
     )
-    snapshot = decode_continuation(store.checkpoint_shard(latest, "runtime.pkl"))
+    snapshot = decode_continuation(
+        store.checkpoint_shard(latest, "runtime.pkl")
+    )
     call = cast(CallFrameSnapshot, snapshot.frames[-1])
     assert call.phase == "child_pending"
     assert call.child_call_path is None
@@ -1400,7 +1453,9 @@ def test_resume_pending_workflow_call_supersedes_partial_child_attempt(
     marker.write_text("interrupted entry", encoding="utf-8")
 
     (child / "allow-second").touch()
-    result = Dispatcher(project_root=tmp_path).resume(definition, output_dir=output)
+    result = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
 
     assert result.output == 6
     # The abandoned process may finish after its event callback is interrupted;
@@ -1409,9 +1464,9 @@ def test_resume_pending_workflow_call_supersedes_partial_child_attempt(
         "first",
         "first",
     ]
-    assert sorted(path.name for path in (call_directory / "enter").iterdir()) == [
-        "000001", "000002"
-    ]
+    assert sorted(
+        path.name for path in (call_directory / "enter").iterdir()
+    ) == ["000001", "000002"]
     assert marker.read_text("utf-8") == "interrupted entry"
     assert not list(call_directory.glob("attempt-*"))
 
@@ -1425,7 +1480,9 @@ def test_resume_after_return_interruption_does_not_reinvoke_child(
     )
     output = tmp_path / "nested-returned"
 
-    with pytest.raises(KeyboardInterrupt, match="nested completion interrupted"):
+    with pytest.raises(
+        KeyboardInterrupt, match="nested completion interrupted"
+    ):
         (
             Dispatcher(project_root=tmp_path).run(
                 definition,
@@ -1438,7 +1495,9 @@ def test_resume_after_return_interruption_does_not_reinvoke_child(
     assert store.manifest().status is RunStatus.INTERRUPTED
     latest = store.manifest().checkpoints.latest_restorable
     assert latest is not None
-    snapshot = decode_continuation(store.checkpoint_shard(latest, "runtime.pkl"))
+    snapshot = decode_continuation(
+        store.checkpoint_shard(latest, "runtime.pkl")
+    )
     assert [type(frame) for frame in snapshot.frames] == [
         GraphFrameSnapshot,
         CallFrameSnapshot,
@@ -1449,7 +1508,9 @@ def test_resume_after_return_interruption_does_not_reinvoke_child(
     assert calls == ["call", "child_first", "child_second", "call"]
 
     failures["complete"] = False
-    result = Dispatcher(project_root=tmp_path).resume(definition, output_dir=output)
+    result = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
 
     assert result.output == 13
     assert calls == [
@@ -1526,7 +1587,9 @@ def test_call_replay_divergence_caught_as_base_exception_still_fails(
     ]
 
 
-def test_extra_call_replay_invocation_cannot_be_swallowed(tmp_path: Path) -> None:
+def test_extra_call_replay_invocation_cannot_be_swallowed(
+    tmp_path: Path,
+) -> None:
     definition, calls, _ = _nested_workflow(
         "swallowed_second_invoke",
         adapter_mode="swallow_two",
@@ -1572,7 +1635,9 @@ def test_call_visit_must_invoke_exactly_one_child(
         )
 
 
-def test_async_call_visit_is_rejected_as_synchronous_api(tmp_path: Path) -> None:
+def test_async_call_visit_is_rejected_as_synchronous_api(
+    tmp_path: Path,
+) -> None:
     definition, _, _ = _nested_workflow("async_adapter", adapter_mode="async")
 
     with pytest.raises(RuntimeError, match=r"\[async_call_visit\]"):
@@ -1599,7 +1664,9 @@ def test_deterministic_nan_child_params_do_not_diverge(tmp_path: Path) -> None:
     assert result.output == 13
 
 
-def test_local_child_mutation_does_not_change_replay_journal(tmp_path: Path) -> None:
+def test_local_child_mutation_does_not_change_replay_journal(
+    tmp_path: Path,
+) -> None:
     definition, _, _ = _nested_workflow(
         "mutable_request",
         adapter_mode="mutable",
@@ -1615,7 +1682,9 @@ def test_local_child_mutation_does_not_change_replay_journal(tmp_path: Path) -> 
     assert result.output == 13
 
 
-@pytest.mark.parametrize("policy", (CheckpointPolicy.AUTO, CheckpointPolicy.REQUIRED))
+@pytest.mark.parametrize(
+    "policy", (CheckpointPolicy.AUTO, CheckpointPolicy.REQUIRED)
+)
 def test_unserializable_call_request_obeys_checkpoint_policy(
     tmp_path: Path,
     policy: CheckpointPolicy,
@@ -1678,7 +1747,9 @@ def test_call_visit_can_catch_recorded_child_exception(tmp_path: Path) -> None:
     assert child_return and child_return[-1].restore_available
 
 
-def test_resume_replays_child_exception_without_rerunning_child(tmp_path: Path) -> None:
+def test_resume_replays_child_exception_without_rerunning_child(
+    tmp_path: Path,
+) -> None:
     definition, calls, failures = _nested_workflow(
         "replayed_exception",
         child_exception=True,

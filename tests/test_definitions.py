@@ -1,6 +1,6 @@
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-import sys
 from types import ModuleType
 from typing import assert_type
 
@@ -20,7 +20,7 @@ def test_definition_loader_retains_type_and_checks_before_reading_identity(
 ) -> None:
     declaration = ModuleType("runtime_test_definition_loader")
     expected = LoadedDefinition(identifier=GraphId("loaded"))
-    setattr(declaration, "definition", lambda: expected)
+    declaration.__dict__["definition"] = lambda: expected
     monkeypatch.setitem(sys.modules, declaration.__name__, declaration)
     monkeypatch.setattr(sys, "path", list(sys.path))
     identities: list[LoadedDefinition] = []
@@ -30,7 +30,11 @@ def test_definition_loader_retains_type_and_checks_before_reading_identity(
         return definition.identifier
 
     loaded, module = load_definition(
-        tmp_path, declaration.__name__, expected.identifier, LoadedDefinition, identity
+        tmp_path,
+        declaration.__name__,
+        expected.identifier,
+        LoadedDefinition,
+        identity,
     )
     assert_type(loaded, LoadedDefinition)
     assert loaded is expected
@@ -39,21 +43,35 @@ def test_definition_loader_retains_type_and_checks_before_reading_identity(
 
     with pytest.raises(ValueError, match="definition id does not match"):
         load_definition(
-            tmp_path, declaration.__name__, GraphId("other"), LoadedDefinition, identity
+            tmp_path,
+            declaration.__name__,
+            GraphId("other"),
+            LoadedDefinition,
+            identity,
         )
     assert identities == [expected, expected]
 
     identities.clear()
-    setattr(declaration, "definition", lambda: object())
-    with pytest.raises(TypeError, match=r"definition\(\) is not LoadedDefinition"):
+    declaration.__dict__["definition"] = lambda: object()
+    with pytest.raises(
+        TypeError, match=r"definition\(\) is not LoadedDefinition"
+    ):
         load_definition(
-            tmp_path, declaration.__name__, expected.identifier, LoadedDefinition, identity
+            tmp_path,
+            declaration.__name__,
+            expected.identifier,
+            LoadedDefinition,
+            identity,
         )
     assert identities == []
 
-    setattr(declaration, "definition", None)
+    declaration.__dict__["definition"] = None
     with pytest.raises(TypeError, match="definition is not callable"):
         load_definition(
-            tmp_path, declaration.__name__, expected.identifier, LoadedDefinition, identity
+            tmp_path,
+            declaration.__name__,
+            expected.identifier,
+            LoadedDefinition,
+            identity,
         )
     assert identities == []

@@ -17,6 +17,7 @@ from typing import cast
 
 import pytest
 from report_helpers import table_rows
+
 from verdog_runtime import CancellationToken, ExecutionCancelled
 from verdog_runtime.agents import (
     AgentInvocationError,
@@ -24,8 +25,6 @@ from verdog_runtime.agents import (
     AgentRequest,
     AgentSessionAction,
     AgentSessionCapabilities,
-    claude,
-    codex,
 )
 from verdog_runtime.agents._command import CommandResult, json_objects
 from verdog_runtime.agents.claude import ClaudeInvoker
@@ -63,7 +62,11 @@ from verdog_runtime.declarations.ids import (
     ProviderSessionId,
     RunId,
 )
-from verdog_runtime.interpreter import CheckpointPolicy, Dispatcher, validate_graph
+from verdog_runtime.interpreter import (
+    CheckpointPolicy,
+    Dispatcher,
+    validate_graph,
+)
 from verdog_runtime.interpreter._agents import SessionResource
 from verdog_runtime.interpreter._calls import subroutine_scope
 from verdog_runtime.interpreter._invocations import InvocationJournalError
@@ -114,7 +117,9 @@ def _agent_graph(
         failure=failure,
         nodes=(node,),
         profile_parameters=(
-            AgentProfileParameter(id=AgentProfileId(profile_id), name=profile_id),
+            AgentProfileParameter(
+                id=AgentProfileId(profile_id), name=profile_id
+            ),
         ),
         session_parameters=(
             AgentSessionParameter(
@@ -131,21 +136,23 @@ def _agent_graph(
                     implementation=implementation,
                 ),
             ),
-            EdgeDefinition(id=EdgeId("agent-exit"), source=node.id, target=exit_.id),
+            EdgeDefinition(
+                id=EdgeId("agent-exit"), source=node.id, target=exit_.id
+            ),
         ),
     )
 
 
 def _workflow(
     graph: GraphDefinition[object, object, None, object],
-    configuration: WorkflowConfiguration = WorkflowConfiguration(),
+    configuration: WorkflowConfiguration | None = None,
     *,
     workflow_id: GraphId | None = None,
 ) -> WorkflowDefinition[object, object, None, object]:
     subroutine = SubroutineDefinition(graph=graph)
     module_name = f"runtime_test_workflow_entry_{next(_workflow_module_ids)}"
     module = ModuleType(module_name)
-    setattr(module, "definition", lambda: subroutine)
+    module.__dict__["definition"] = lambda: subroutine
     sys.modules[module_name] = module
     params_types: dict[ParameterAddress, ParameterType] = {
         (".", graph.id): graph.params_type
@@ -161,13 +168,17 @@ def _workflow(
             definition_module=module_name,
             params_types=params_types,
             profile_arguments={
-                parameter.id: parameter.id for parameter in graph.profile_parameters
+                parameter.id: parameter.id
+                for parameter in graph.profile_parameters
             },
             session_arguments={
-                parameter.id: parameter.id for parameter in graph.session_parameters
+                parameter.id: parameter.id
+                for parameter in graph.session_parameters
             },
         ),
-        configuration=configuration,
+        configuration=(
+            WorkflowConfiguration() if configuration is None else configuration
+        ),
         sessions=tuple(
             AgentSessionDefinition(
                 id=parameter.id,
@@ -246,7 +257,9 @@ def _subroutine_project(
             failure=PortDefinition(id=NodeId("failure")),
             nodes=(),
             edges=(
-                EdgeDefinition(id=EdgeId("pass"), source=enter.id, target=exit_.id),
+                EdgeDefinition(
+                    id=EdgeId("pass"), source=enter.id, target=exit_.id
+                ),
             ),
         ),
     )
@@ -278,7 +291,7 @@ def _register_root_workflow(
     /,
 ) -> None:
     module = ModuleType("runtime_test_project.workflows.main")
-    setattr(module, "definition", lambda: definition)
+    module.__dict__["definition"] = lambda: definition
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
 
@@ -294,13 +307,15 @@ def test_subroutine_module_requires_matching_definition_id(
         return Success(output=input, state=state)
 
     definition = SubroutineDefinition(
-        graph=_agent_graph(implementation, graph_id="runtime_test_project.main__actual")
+        graph=_agent_graph(
+            implementation, graph_id="runtime_test_project.main__actual"
+        )
     )
     project = _subroutine_project(tmp_path, monkeypatch, definition)
     requested = ModuleType(
         "runtime_test_project.subroutines.main.subroutines.requested"
     )
-    setattr(requested, "definition", lambda: definition)
+    requested.__dict__["definition"] = lambda: definition
     monkeypatch.setitem(sys.modules, requested.__name__, requested)
 
     with pytest.raises(ValueError, match="definition id does not match"):
@@ -353,7 +368,9 @@ class _InterruptingInvoker:
             raise KeyboardInterrupt
         return AgentReply(
             text=f"reply-{len(self.requests)}",
-            provider_session_id=ProviderSessionId(f"session-{len(self.requests)}"),
+            provider_session_id=ProviderSessionId(
+                f"session-{len(self.requests)}"
+            ),
         )
 
 
@@ -409,7 +426,9 @@ def test_required_restored_session_rejects_provider_without_branching() -> None:
         require_copy_on_write=True,
     )
 
-    with pytest.raises(AgentInvocationError, match="cannot fork persistent session"):
+    with pytest.raises(
+        AgentInvocationError, match="cannot fork persistent session"
+    ):
         resource.request(
             AgentSessionId("conversation"),
             _RecordingInvoker(),
@@ -476,10 +495,14 @@ def test_agent_implementation_may_choose_not_to_invoke(
     assert result.output == "skipped"
     assert invoker.requests == []
     rows = table_rows(tmp_path / "output/stats.md", "Nodes")
-    assert any(row[1:5] == ["agent.graph", "agent", "agent", "1"] for row in rows)
+    assert any(
+        row[1:5] == ["agent.graph", "agent", "agent", "1"] for row in rows
+    )
 
 
-def test_missing_agent_profiles_fail_before_creating_outputs(tmp_path: Path) -> None:
+def test_missing_agent_profiles_fail_before_creating_outputs(
+    tmp_path: Path,
+) -> None:
     def implementation(
         input: object,
         state: EmptyState,
@@ -512,14 +535,18 @@ def test_missing_agent_profiles_fail_before_creating_outputs(tmp_path: Path) -> 
 
     with pytest.raises(
         ValueError,
-        match="workflow configuration is missing profile arguments: alpha, zeta",
+        match=(
+            "workflow configuration is missing profile arguments: alpha, zeta"
+        ),
     ):
         Dispatcher().run(_workflow(graph), None, output_dir=output)
 
     assert not output.exists()
 
 
-def test_workflow_entry_maps_caller_profile_and_session_ids(tmp_path: Path) -> None:
+def test_workflow_entry_maps_caller_profile_and_session_ids(
+    tmp_path: Path,
+) -> None:
     invoker = _RecordingInvoker()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -550,10 +577,14 @@ def test_workflow_entry_maps_caller_profile_and_session_ids(tmp_path: Path) -> N
         entry=replace(
             workflow.entry,
             profile_arguments={
-                AgentProfileId("target_profile"): AgentProfileId("caller_profile")
+                AgentProfileId("target_profile"): AgentProfileId(
+                    "caller_profile"
+                )
             },
             session_arguments={
-                AgentSessionId("target_session"): AgentSessionId("caller_session")
+                AgentSessionId("target_session"): AgentSessionId(
+                    "caller_session"
+                )
             },
         ),
         sessions=(
@@ -592,7 +623,9 @@ def test_agent_sessions_are_run_local_and_invocations_are_artifacts(
     dispatcher = Dispatcher()
     definition = _workflow(
         _agent_graph(implementation),
-        WorkflowConfiguration(profile_arguments={AgentProfileId("default"): invoker}),
+        WorkflowConfiguration(
+            profile_arguments={AgentProfileId("default"): invoker}
+        ),
     )
     first_root = tmp_path / "first-run"
     first = dispatcher.run(
@@ -618,7 +651,8 @@ def test_agent_sessions_are_run_local_and_invocations_are_artifacts(
         ProviderSessionId("session-3"),
     ]
     assert [
-        request.artifact_dir.relative_to(first_root) for request in invoker.requests[:2]
+        request.artifact_dir.relative_to(first_root)
+        for request in invoker.requests[:2]
     ] == [
         Path("agent/000001/invocations/000001"),
         Path("agent/000001/invocations/000002"),
@@ -635,9 +669,16 @@ def test_agent_sessions_are_run_local_and_invocations_are_artifacts(
         assert request.persistent is True
         assert request.workspace == workspace.resolve()
         assert request.access is AgentAccess.READ_ONLY
-        assert request.node_context.output_dir == request.artifact_dir.parent.parent
-        assert (request.artifact_dir / "prompt.txt").read_text("utf-8") == prompt
-        assert (request.artifact_dir / "response.txt").read_text("utf-8") == response
+        assert (
+            request.node_context.output_dir
+            == request.artifact_dir.parent.parent
+        )
+        assert (request.artifact_dir / "prompt.txt").read_text(
+            "utf-8"
+        ) == prompt
+        assert (request.artifact_dir / "response.txt").read_text(
+            "utf-8"
+        ) == response
 
 
 def test_agent_session_advances_before_response_artifact_write(
@@ -657,8 +698,10 @@ def test_agent_session_advances_before_response_artifact_write(
             context.invoke("first", workspace=workspace)
         except IsADirectoryError:
             (context.output_dir / "invocations/000001/response.txt").rmdir()
-        else:  # pragma: no cover - the fake invoker deliberately poisons this path
-            raise AssertionError("response artifact write unexpectedly succeeded")
+        else:  # pragma: no cover - deliberately poisoned by the fake invoker
+            raise AssertionError(
+                "response artifact write unexpectedly succeeded"
+            )
         response = context.invoke("second", workspace=workspace)
         return Success(output=response, state=state)
 
@@ -680,7 +723,9 @@ def test_agent_session_advances_before_response_artifact_write(
     ]
 
 
-def test_persistent_agent_session_cannot_cross_providers(tmp_path: Path) -> None:
+def test_persistent_agent_session_cannot_cross_providers(
+    tmp_path: Path,
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -725,7 +770,9 @@ def test_persistent_agent_session_cannot_cross_providers(tmp_path: Path) -> None
         ),
     )
 
-    with pytest.raises(RuntimeError, match="belongs to provider test, not other"):
+    with pytest.raises(
+        RuntimeError, match="belongs to provider test, not other"
+    ):
         (
             Dispatcher().run(
                 _workflow(
@@ -761,7 +808,9 @@ def test_persistent_agent_session_can_move_workspace_but_keeps_access(
         context.invoke("first", workspace=workspace)
         context.invoke("second", workspace=other_workspace)
         context.invoke(
-            "third", workspace=other_workspace, access=AgentAccess.WORKSPACE_WRITE
+            "third",
+            workspace=other_workspace,
+            access=AgentAccess.WORKSPACE_WRITE,
         )
         return Success(output=None, state=state)
 
@@ -799,7 +848,9 @@ def test_persistent_agent_session_can_move_workspace_but_keeps_access(
             "must be a non-empty string",
         ),
         (
-            AgentReply(text="reply", provider_session_id=cast(ProviderSessionId, 7)),
+            AgentReply(
+                text="reply", provider_session_id=cast(ProviderSessionId, 7)
+            ),
             "must be a non-empty string",
         ),
     ],
@@ -832,7 +883,9 @@ def test_agent_rejects_invalid_replies(
                 _workflow(
                     _agent_graph(implementation),
                     WorkflowConfiguration(
-                        profile_arguments={AgentProfileId("default"): InvalidInvoker()}
+                        profile_arguments={
+                            AgentProfileId("default"): InvalidInvoker()
+                        }
                     ),
                 ),
                 None,
@@ -866,7 +919,9 @@ def test_subroutines_share_the_owning_run_agent_sessions(
         child,
         profile_parameters=(
             *child.profile_parameters,
-            AgentProfileParameter(id=AgentProfileId("fallback"), name="fallback"),
+            AgentProfileParameter(
+                id=AgentProfileId("fallback"), name="fallback"
+            ),
         ),
         session_parameters=(
             *child.session_parameters,
@@ -908,8 +963,12 @@ def test_subroutines_share_the_owning_run_agent_sessions(
                     AgentProfileId("fallback"): AgentProfileId("fallback"),
                 },
                 session_arguments={
-                    AgentSessionId("child_session"): AgentSessionId("conversation"),
-                    AgentSessionId("retry_session"): AgentSessionId("retry_session"),
+                    AgentSessionId("child_session"): AgentSessionId(
+                        "conversation"
+                    ),
+                    AgentSessionId("retry_session"): AgentSessionId(
+                        "retry_session"
+                    ),
                 },
             ),
         )
@@ -924,7 +983,9 @@ def test_subroutines_share_the_owning_run_agent_sessions(
         nodes=calls,
         profile_parameters=(
             AgentProfileParameter(id=AgentProfileId("default"), name="default"),
-            AgentProfileParameter(id=AgentProfileId("fallback"), name="fallback"),
+            AgentProfileParameter(
+                id=AgentProfileId("fallback"), name="fallback"
+            ),
         ),
         session_parameters=(
             AgentSessionParameter(
@@ -977,12 +1038,15 @@ def test_subroutines_share_the_owning_run_agent_sessions(
         ProviderSessionId("session-1"),
     ]
     assert all(
-        request.node_context.graph_id == child.id for request in invoker.requests
+        request.node_context.graph_id == child.id
+        for request in invoker.requests
     )
     operation = cast(SubroutineCall, calls[0].operation)
     incomplete = replace(
         operation,
-        profile_arguments={AgentProfileId("default"): AgentProfileId("default")},
+        profile_arguments={
+            AgentProfileId("default"): AgentProfileId("default")
+        },
     )
     incomplete_workflow = _workflow(
         replace(
@@ -993,7 +1057,9 @@ def test_subroutines_share_the_owning_run_agent_sessions(
         workflow_id=workflow.id,
     )
     _register_root_workflow(monkeypatch, incomplete_workflow)
-    with pytest.raises(ValueError, match="profile resource arguments do not match"):
+    with pytest.raises(
+        ValueError, match="profile resource arguments do not match"
+    ):
         Dispatcher(project_root=project).run(
             incomplete_workflow,
             "start",
@@ -1035,7 +1101,9 @@ def test_subroutines_share_the_owning_run_agent_sessions(
         "start",
         output_dir=tmp_path / "ephemeral-output",
     )
-    assert [request.provider_session_id for request in invoker.requests[-2:]] == [
+    assert [
+        request.provider_session_id for request in invoker.requests[-2:]
+    ] == [
         None,
         None,
     ]
@@ -1169,7 +1237,9 @@ def test_local_agent_resources_are_created_per_subroutine_invocation(
 
 
 def _executable(path: Path, source: str, /) -> Path:
-    path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(source), encoding="utf-8")
+    path.write_text(
+        f"#!{sys.executable}\n" + textwrap.dedent(source), encoding="utf-8"
+    )
     path.chmod(0o755)
     return path
 
@@ -1200,12 +1270,19 @@ def _provider_request(path: Path) -> AgentRequest:
 def test_builtin_agents_advertise_latest_session_forks(
     invoker: CodexInvoker | ClaudeInvoker,
 ) -> None:
-    assert invoker.session_capabilities == AgentSessionCapabilities(fork_latest=True)
+    assert invoker.session_capabilities == AgentSessionCapabilities(
+        fork_latest=True
+    )
 
 
 @pytest.mark.parametrize(
     ("last_message", "message"),
-    [(None, "latest"), ("", ""), ("file response", "ignored"), (" ", "ignored")],
+    [
+        (None, "latest"),
+        ("", ""),
+        ("file response", "ignored"),
+        (" ", "ignored"),
+    ],
 )
 def test_codex_parses_events_once_and_preserves_response_precedence(
     tmp_path: Path,
@@ -1240,16 +1317,19 @@ def test_codex_parses_events_once_and_preserves_response_precedence(
 
     def run(command: Sequence[str], _request: AgentRequest, /) -> CommandResult:
         if last_message is not None:
-            Path(command[command.index("-o") + 1]).write_text(last_message, "utf-8")
+            Path(command[command.index("-o") + 1]).write_text(
+                last_message, "utf-8"
+            )
         return CommandResult(returncode=0, events=events, stderr="")
 
-    monkeypatch.setattr(codex, "json_objects", parse)
+    monkeypatch.setattr("verdog_runtime.agents._command.json_objects", parse)
     monkeypatch.setattr("verdog_runtime.agents._command.run_command", run)
     reply = CodexInvoker()(_provider_request(tmp_path))
 
     assert parsed == [events]
     assert reply == AgentReply(
-        text=last_message or message, provider_session_id=ProviderSessionId("first")
+        text=last_message or message,
+        provider_session_id=ProviderSessionId("first"),
     )
     assert (tmp_path / "reasoning.txt").read_text("utf-8") == (
         "top\n\nnested\n\nfinal thought"
@@ -1303,10 +1383,12 @@ def test_claude_uses_the_last_result_and_first_session(
         parsed.append(value)
         return json_objects(value)
 
-    def run(_command: Sequence[str], _request: AgentRequest, /) -> CommandResult:
+    def run(
+        _command: Sequence[str], _request: AgentRequest, /
+    ) -> CommandResult:
         return CommandResult(returncode=0, events=events, stderr="")
 
-    monkeypatch.setattr(claude, "json_objects", parse)
+    monkeypatch.setattr("verdog_runtime.agents._command.json_objects", parse)
     monkeypatch.setattr("verdog_runtime.agents._command.run_command", run)
     if error is not None:
         with pytest.raises(AgentInvocationError, match=error):
@@ -1315,7 +1397,9 @@ def test_claude_uses_the_last_result_and_first_session(
         reply = ClaudeInvoker()(_provider_request(tmp_path))
         assert terminal is not None and reply.text == terminal["result"]
         assert reply.provider_session_id == ProviderSessionId("first")
-        assert (tmp_path / "reasoning.txt").read_text("utf-8") == "first thought"
+        assert (tmp_path / "reasoning.txt").read_text(
+            "utf-8"
+        ) == "first thought"
     assert parsed == [events]
 
 
@@ -1331,7 +1415,9 @@ def test_builtin_agents_fork_provider_sessions(
         events = "\n".join(
             (
                 json.dumps({"thread_id": "child"}),
-                json.dumps({"item": {"type": "agent_message", "text": "reply"}}),
+                json.dumps(
+                    {"item": {"type": "agent_message", "text": "reply"}}
+                ),
             )
         )
     else:
@@ -1410,14 +1496,20 @@ def test_builtin_agents_reject_invalid_fork_requests(
         invoker(request)
 
 
-@pytest.mark.parametrize("provider_session_id", (None, ProviderSessionId("source")))
+@pytest.mark.parametrize(
+    "provider_session_id", (None, ProviderSessionId("source"))
+)
 def test_builtin_agent_forks_require_a_distinct_returned_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     provider_session_id: ProviderSessionId | None,
 ) -> None:
-    def run(_command: Sequence[str], _request: AgentRequest, /) -> CommandResult:
-        event: dict[str, object] = {"item": {"type": "agent_message", "text": "reply"}}
+    def run(
+        _command: Sequence[str], _request: AgentRequest, /
+    ) -> CommandResult:
+        event: dict[str, object] = {
+            "item": {"type": "agent_message", "text": "reply"}
+        }
         if provider_session_id is not None:
             event["thread_id"] = provider_session_id
         return CommandResult(returncode=0, events=json.dumps(event), stderr="")
@@ -1442,43 +1534,66 @@ def test_builtin_agent_forks_require_a_distinct_returned_session(
     assert metadata["provider_session_source"] == "source"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="test providers use executable scripts")
+@pytest.mark.skipif(
+    os.name == "nt", reason="test providers use executable scripts"
+)
 @pytest.mark.parametrize("provider", ["codex", "claude"])
-def test_builtin_agent_artifacts_and_commands(tmp_path: Path, provider: str) -> None:
+def test_builtin_agent_artifacts_and_commands(
+    tmp_path: Path, provider: str
+) -> None:
     workspaces = (tmp_path / "workspace", tmp_path / "resumed-workspace")
     for workspace in workspaces:
         workspace.mkdir()
     executable = _executable(
         tmp_path / provider,
         """
-        import json
-        from pathlib import Path
-        import sys
+import json
+from pathlib import Path
+import sys
 
-        arguments = sys.argv[1:]
-        with Path("arguments.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(arguments) + "\\n")
-        prompt = sys.stdin.read()
-        if sys.argv[0].endswith("codex"):
-            output = Path(arguments[arguments.index("-o") + 1])
-            output.write_text("codex:" + prompt, encoding="utf-8")
-            print(json.dumps({"type": "thread.started", "thread_id": "codex-session"}))
-            print(json.dumps({"type": "agent_reasoning", "text": "codex thought"}))
-        else:
-            print(json.dumps({
+arguments = sys.argv[1:]
+with Path("arguments.jsonl").open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(arguments) + "\\n")
+prompt = sys.stdin.read()
+if sys.argv[0].endswith("codex"):
+    output = Path(arguments[arguments.index("-o") + 1])
+    output.write_text("codex:" + prompt, encoding="utf-8")
+    print(
+        json.dumps(
+            {"type": "thread.started", "thread_id": "codex-session"}
+        )
+    )
+    print(
+        json.dumps({"type": "agent_reasoning", "text": "codex thought"})
+    )
+else:
+    print(
+        json.dumps(
+            {
                 "type": "assistant",
-                "message": {"content": [
-                    {"type": "thinking", "thinking": "claude thought"}
-                ]},
-            }))
-            print(json.dumps({
+                "message": {
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "claude thought",
+                        }
+                    ]
+                },
+            }
+        )
+    )
+    print(
+        json.dumps(
+            {
                 "type": "result",
                 "is_error": False,
                 "result": "claude:" + prompt,
                 "session_id": "claude-session",
-            }))
-        print(provider + " stderr", file=sys.stderr)
-        """.replace("provider", repr(provider)),
+            }
+        )
+    )
+print(provider + " stderr", file=sys.stderr)
+""".replace("provider", repr(provider)),
     )
     profile_id = AgentProfileId(provider)
     if provider == "codex":
@@ -1509,7 +1624,9 @@ def test_builtin_agent_artifacts_and_commands(tmp_path: Path, provider: str) -> 
         /,
     ) -> Success[object, EmptyState]:
         first = context.invoke("first", workspace=workspaces[0], access=access)
-        second = context.invoke("second", workspace=workspaces[1], access=access)
+        second = context.invoke(
+            "second", workspace=workspaces[1], access=access
+        )
         return Success(output=(first, second), state=state)
 
     output = tmp_path / "output"
@@ -1538,8 +1655,12 @@ def test_builtin_agent_artifacts_and_commands(tmp_path: Path, provider: str) -> 
             f"{provider}:" + ("first" if number == 1 else "second")
         )
         assert (artifact / "events.jsonl").is_file()
-        assert (artifact / "stderr.txt").read_text("utf-8") == f"{provider} stderr\n"
-        assert (artifact / "reasoning.txt").read_text("utf-8") == f"{provider} thought"
+        assert (artifact / "stderr.txt").read_text(
+            "utf-8"
+        ) == f"{provider} stderr\n"
+        assert (artifact / "reasoning.txt").read_text(
+            "utf-8"
+        ) == f"{provider} thought"
         metadata = cast(
             dict[str, object],
             json.loads((artifact / "metadata.json").read_text("utf-8")),
@@ -1552,7 +1673,9 @@ def test_builtin_agent_artifacts_and_commands(tmp_path: Path, provider: str) -> 
             "provider": provider,
             "returncode": 0,
             "provider_session_action": "continue",
-            "provider_session_source": (None if number == 1 else str(expected_session)),
+            "provider_session_source": (
+                None if number == 1 else str(expected_session)
+            ),
             "provider_session": str(expected_session),
             "session": f"{provider}_session",
             "status": "succeeded",
@@ -1563,7 +1686,10 @@ def test_builtin_agent_artifacts_and_commands(tmp_path: Path, provider: str) -> 
         assert not (artifact / "stdout.txt").exists()
 
     arguments = [
-        cast(list[str], json.loads((workspace / "arguments.jsonl").read_text("utf-8")))
+        cast(
+            list[str],
+            json.loads((workspace / "arguments.jsonl").read_text("utf-8")),
+        )
         for workspace in workspaces
     ]
     assert len(arguments) == 2
@@ -1572,7 +1698,9 @@ def test_builtin_agent_artifacts_and_commands(tmp_path: Path, provider: str) -> 
             assert command[0] == "exec"
             assert command[1:3] == ["--color", "never"]
             assert command[-1] == "-"
-            assert command[command.index("-C") + 1] == str(workspaces[index].resolve())
+            assert command[command.index("-C") + 1] == str(
+                workspaces[index].resolve()
+            )
             assert command.count("--sandbox") == 1
             sandbox = len(command) - 1 - command[::-1].index("--sandbox")
             assert command[sandbox + 1] == "read-only"
@@ -1590,7 +1718,9 @@ def test_builtin_agent_artifacts_and_commands(tmp_path: Path, provider: str) -> 
             assert command[1:3] == ["--max-budget-usd", "1"]
             assert command.count("--permission-mode") == 1
             assert command.count("--tools") == 1
-            permission = len(command) - 1 - command[::-1].index("--permission-mode")
+            permission = (
+                len(command) - 1 - command[::-1].index("--permission-mode")
+            )
             tools = len(command) - 1 - command[::-1].index("--tools")
             assert command[permission + 1] == "plan"
             assert command[tools + 1] == "Read,Glob,Grep,WebSearch,WebFetch"
@@ -1599,7 +1729,9 @@ def test_builtin_agent_artifacts_and_commands(tmp_path: Path, provider: str) -> 
             if index == 0:
                 assert "--resume" not in command
             else:
-                assert command[command.index("--resume") + 1] == "claude-session"
+                assert (
+                    command[command.index("--resume") + 1] == "claude-session"
+                )
 
 
 @pytest.mark.parametrize(
@@ -1650,20 +1782,20 @@ def test_builtin_agent_cancellation_kills_and_reaps_process_tree(
     executable = _executable(
         tmp_path / "codex",
         """
-        from pathlib import Path
-        import subprocess
-        import sys
-        import time
+from pathlib import Path
+import subprocess
+import sys
+import time
 
-        child = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
-            start_new_session=True,
-        )
-        Path("pids").write_text(
-            f"{__import__('os').getpid()} {child.pid}", encoding="ascii"
-        )
-        time.sleep(30)
-        """,
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    start_new_session=True,
+)
+Path("pids").write_text(
+    f"{__import__('os').getpid()} {child.pid}", encoding="ascii"
+)
+time.sleep(30)
+""",
     )
     artifact = tmp_path / "artifact"
     artifact.mkdir()
@@ -1707,7 +1839,9 @@ def test_builtin_agent_cancellation_kills_and_reaps_process_tree(
     if interrupter is not None:
         assert not interrupter.is_alive()
     assert pids_path.exists()
-    parent, child = (int(value) for value in pids_path.read_text("ascii").split())
+    parent, child = (
+        int(value) for value in pids_path.read_text("ascii").split()
+    )
     _wait_until_gone(parent)
     _wait_until_gone(child)
     metadata = cast(
@@ -1754,7 +1888,9 @@ def test_exact_resume_refuses_an_ambiguous_agent_request_without_retry(
 
     definition = _workflow(
         _agent_graph(implementation),
-        WorkflowConfiguration(profile_arguments={AgentProfileId("default"): invoker}),
+        WorkflowConfiguration(
+            profile_arguments={AgentProfileId("default"): invoker}
+        ),
     )
     output = tmp_path / "output"
     with pytest.raises(KeyboardInterrupt):
@@ -1811,7 +1947,9 @@ def test_exact_resume_replays_a_durably_completed_agent_reply(
 
     definition = _workflow(
         _agent_graph(implementation),
-        WorkflowConfiguration(profile_arguments={AgentProfileId("default"): invoker}),
+        WorkflowConfiguration(
+            profile_arguments={AgentProfileId("default"): invoker}
+        ),
     )
     output = tmp_path / "output"
     with pytest.raises(KeyboardInterrupt):
@@ -1833,7 +1971,10 @@ def test_exact_resume_replays_a_durably_completed_agent_reply(
     assert node_attempts == 2
     assert len(invoker.requests) == 1
     attempts = sorted(output.glob("agent/*/invocations/000001/response.txt"))
-    assert [path.read_text("utf-8") for path in attempts] == ["reply-1", "reply-1"]
+    assert [path.read_text("utf-8") for path in attempts] == [
+        "reply-1",
+        "reply-1",
+    ]
 
 
 def test_replayed_reply_advances_a_restored_copy_on_write_session_once(
@@ -1916,7 +2057,9 @@ def test_replayed_reply_advances_a_restored_copy_on_write_session_once(
     )
     definition = _workflow(
         graph,
-        WorkflowConfiguration(profile_arguments={AgentProfileId("default"): invoker}),
+        WorkflowConfiguration(
+            profile_arguments={AgentProfileId("default"): invoker}
+        ),
     )
     output = tmp_path / "output"
     with pytest.raises(KeyboardInterrupt):
@@ -1931,9 +2074,16 @@ def test_replayed_reply_advances_a_restored_copy_on_write_session_once(
 
     assert len(invoker.requests) == 2
     assert invoker.requests[0].provider_session_id is None
-    assert invoker.requests[0].provider_session_action is AgentSessionAction.CONTINUE
-    assert invoker.requests[1].provider_session_id == ProviderSessionId("session-1")
-    assert invoker.requests[1].provider_session_action is AgentSessionAction.FORK
+    assert (
+        invoker.requests[0].provider_session_action
+        is AgentSessionAction.CONTINUE
+    )
+    assert invoker.requests[1].provider_session_id == ProviderSessionId(
+        "session-1"
+    )
+    assert (
+        invoker.requests[1].provider_session_action is AgentSessionAction.FORK
+    )
 
     resumed = Dispatcher(project_root=tmp_path).resume(
         definition,
@@ -1949,7 +2099,13 @@ def test_web_search_is_off_unless_the_profile_opts_in(tmp_path: Path) -> None:
     claude = ClaudeInvoker()._command(request)  # pyright: ignore[reportPrivateUsage]
     assert claude[claude.index("--tools") + 1] == "Read,Glob,Grep"
     searching = ClaudeInvoker(web_search=True)._command(request)  # pyright: ignore[reportPrivateUsage]
-    assert searching[searching.index("--tools") + 1] == "Read,Glob,Grep,WebSearch,WebFetch"
+    assert (
+        searching[searching.index("--tools") + 1]
+        == "Read,Glob,Grep,WebSearch,WebFetch"
+    )
     codex = CodexInvoker()._command(request, tmp_path / "last.txt")  # pyright: ignore[reportPrivateUsage]
     assert "--search" not in codex
-    assert "--search" in CodexInvoker(web_search=True)._command(request, tmp_path / "last.txt")  # pyright: ignore[reportPrivateUsage]
+    searching_codex = CodexInvoker(web_search=True)._command(  # pyright: ignore[reportPrivateUsage]
+        request, tmp_path / "last.txt"
+    )
+    assert "--search" in searching_codex

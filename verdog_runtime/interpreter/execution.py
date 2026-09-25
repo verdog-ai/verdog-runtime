@@ -1,164 +1,71 @@
+"""Execute workflow graphs and checkpoint their explicit activation stack."""
+
 from __future__ import annotations
 
+import contextlib
+import copy
+import dataclasses
+import enum
 import json
+import pathlib
 import pickle
 import traceback
-from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
-from copy import deepcopy
-from dataclasses import dataclass, field, replace
-from enum import StrEnum
-from pathlib import Path
-from types import MappingProxyType
+import types
+import urllib.parse
+import uuid
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Generator,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar, cast
-from urllib.parse import quote
-from uuid import uuid4
 
 import cloudpickle
 
-from .._artifact_references import (
-    ArtifactCache,
-    ArtifactReferences,
-    capture_artifacts,
-    decode_artifact_references,
+from verdog_runtime import (
+    _artifact_references,
+    _checkpoint_compatibility,
+    _child_checkpoint,
+    _configuration,
+    _process,
+    _protocol,
+    declarations,
 )
-from .._checkpoint_compatibility import (
-    checkpoint_compatibility,
-    compatibility_drift,
-)
-from .._child_checkpoint import mark_child_checkpoint_fork
-from .._configuration import (
-    ConfigurationValue,
-    InvocationReports,
-    register_invocation,
-    write_configuration,
-)
-from .._process import (
-    compose_project_path,
-    normalize_parameter_address,
-    normalize_project_path,
-)
-from .._protocol import (
-    CheckpointFrame as RemoteCheckpointFrame,
-)
-from .._protocol import (
-    EventFrame,
-    decode_binary_payload,
-)
-from .._run_store import (
-    Boundary,
-    CheckpointKind,
-    CheckpointPolicy,
-    CheckpointSummary,
-    ParentRun,
-    RunStatus,
-    RunStore,
-    RunStoreError,
-    SessionIssue,
-    SessionState,
-    utc_now,
-)
-from .._statistics import RunStatistics, TimingSpan, TimingStatus
-from ..cancellation import CancellationToken, ExecutionCancelled
-from ..child import (
+from verdog_runtime import _run_store as run_store
+from verdog_runtime import _statistics as statistics_module
+from verdog_runtime import cancellation as cancellation_module
+from verdog_runtime import child as child_module
+from verdog_runtime.child import (
     _OMITTED as _OMITTED_CHILD_PARAMS,  # pyright: ignore[reportPrivateUsage]
 )
-from ..child import invoke as invoke_child_process
-from ..declarations import (
-    Agent,
-    AgentAccess,
-    CallContext,
-    CallVisitDefinition,
-    EdgeDefinition,
-    FeatureDefinition,
-    FeatureNodeDefinition,
-    FeatureState,
-    FeatureSuccess,
-    GraphDefinition,
-    NodeContext,
-    NodeDefinition,
-    ParameterAddress,
-    ParameterType,
-    Python,
-    SubroutineCall,
-    SubroutineDefinition,
-    Success,
-    VisitDefinition,
-    WorkflowCall,
-    WorkflowDefinition,
-    WorkflowState,
+from verdog_runtime.declarations import graph as graph_declarations
+from verdog_runtime.declarations import ids, operations
+from verdog_runtime.interpreter import (
+    _agents,
+    _calls,
+    _continuation,
+    _errors,
+    _invocations,
+    policies,
+    validation,
 )
-from ..declarations.graph import VisitImplementation
-from ..declarations.ids import (
-    AgentSessionId,
-    EdgeId,
-    FeatureId,
-    GraphId,
-    NodeId,
-    ProviderSessionId,
-    RunId,
-)
-from ..declarations.operations import Operation
-from ._agents import (
-    NO_RESOURCES,
-    Resources,
-    SessionResource,
-    child_resource_arguments,
-    invocation_resources,
-    invoker,
-)
-from ._calls import (
-    Budget,
-    CallScope,
-    local_subroutine,
-    require_local_workflow,
-    resolve_call_project,
-    subroutine_scope,
-    workflow_subroutine,
-)
-from ._continuation import (
-    FORMAT_VERSION as CONTINUATION_FORMAT_VERSION,
-)
-from ._continuation import (
-    CallFrameSnapshot,
-    ChildReturned,
-    ContinuationSnapshot,
-    DefinitionReference,
-    GraphFrameSnapshot,
-    ParameterSlot,
-    Ready,
-    SessionSnapshot,
-    WaitingForChild,
-    decode_continuation,
-    encode_continuation,
-    fork_continuation,
-    restore_workflow_state,
-    snapshot_workflow_state,
-)
-from ._continuation import (
-    Terminal as TerminalControl,
-)
-from ._errors import fault
-from ._invocations import InvocationJournal
-from .features import (
-    analyze_effects,
-    effects_satisfied,
-    evaluate_conditions,
-    validate_feature_value,
-)
-from .nodes import agent, feature, python
-from .policies import SessionPolicy
-from .validation import require_immutable_state, require_instance, validate_graph
+from verdog_runtime.interpreter import features as feature_semantics
+from verdog_runtime.interpreter.nodes import agent, feature, python
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 ParamsT = TypeVar("ParamsT")
 ScopeT = TypeVar("ScopeT")
 LifecycleResultT = TypeVar("LifecycleResultT")
-FeatureNode: TypeAlias = FeatureNodeDefinition
-Edge: TypeAlias = EdgeDefinition
-_NO_PARAMETERS: Mapping[ParameterAddress, object] = MappingProxyType({})
-_NO_CHECKPOINT_SHARDS: Mapping[str, bytes] = MappingProxyType({})
+FeatureNode: TypeAlias = declarations.FeatureNodeDefinition
+Edge: TypeAlias = declarations.EdgeDefinition
+_NO_PARAMETERS: Mapping[declarations.ParameterAddress, object] = (
+    types.MappingProxyType({})
+)
+_NO_CHECKPOINT_SHARDS: Mapping[str, bytes] = types.MappingProxyType({})
 _USE_REGISTERED_PARAMS = object()
 _RESTART_SESSION_SHARD = "restart-sessions.json"
 _RESTART_SESSION_FORMAT = 1
@@ -175,7 +82,9 @@ class _LifecycleExecutor(Protocol):
     ) -> LifecycleResultT: ...
 
 
-class ExecutionStatus(StrEnum):
+class ExecutionStatus(enum.StrEnum):
+    """Lifecycle status reported for a node or edge execution event."""
+
     PENDING = "pending"
     RUNNING = "running"
     WAITING = "waiting"
@@ -183,24 +92,28 @@ class ExecutionStatus(StrEnum):
     FAILED = "failed"
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclasses.dataclass(slots=True, kw_only=True)
 class NodeExecution:
-    run_id: RunId
-    graph_id: GraphId
-    node_id: NodeId
+    """A node event carrying its state, status, and owning project address."""
+
+    run_id: ids.RunId
+    graph_id: ids.GraphId
+    node_id: ids.NodeId
     status: ExecutionStatus
     state: object
     remote: bool = False
     project_path: str = "."
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclasses.dataclass(slots=True, kw_only=True)
 class EdgeExecution:
-    run_id: RunId
-    graph_id: GraphId
-    edge_id: EdgeId
+    """An edge event carrying its workflow state and owning project address."""
+
+    run_id: ids.RunId
+    graph_id: ids.GraphId
+    edge_id: ids.EdgeId
     status: ExecutionStatus
-    state: WorkflowState[Any] | None
+    state: declarations.WorkflowState[Any] | None
     remote: bool = False
     project_path: str = "."
 
@@ -209,45 +122,56 @@ ExecutionEvent: TypeAlias = NodeExecution | EdgeExecution
 ExecutionHandler: TypeAlias = Callable[[ExecutionEvent], None]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _Terminal(Generic[ScopeT]):
     output: object
-    state: WorkflowState[ScopeT]
+    state: declarations.WorkflowState[ScopeT]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _NodeHandler:
     kind: str
-    execute: Callable[[VisitImplementation, NodeContext[object]], object]
+    execute: Callable[
+        [
+            graph_declarations.VisitImplementation,
+            declarations.NodeContext[object],
+        ],
+        object,
+    ]
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclasses.dataclass(slots=True, kw_only=True)
 class _LiveGraphFrame:
-    project_root: Path
+    project_root: pathlib.Path
     project_path: str
     frame_id: str
-    definition: DefinitionReference
-    graph: GraphDefinition[Any, Any, Any, Any]
-    scope: CallScope
+    definition: _continuation.DefinitionReference
+    graph: declarations.GraphDefinition[Any, Any, Any, Any]
+    scope: _calls.CallScope
     entry_input: object
     params: object
     value: object
-    state: WorkflowState[Any]
-    control: Ready | WaitingForChild | ChildReturned | TerminalControl
+    state: declarations.WorkflowState[Any]
+    control: (
+        _continuation.Ready
+        | _continuation.WaitingForChild
+        | _continuation.ChildReturned
+        | _continuation.Terminal
+    )
     graph_output: _GraphOutput
-    resources: Resources
+    resources: _agents.Resources
     check_output_transport: Callable[[object], bool] | None = None
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclasses.dataclass(slots=True, kw_only=True)
 class _LiveCallFrame:
     frame_id: str
     parent_graph_frame_id: str
-    node_id: NodeId
-    incoming_edge_id: EdgeId
+    node_id: ids.NodeId
+    incoming_edge_id: ids.EdgeId
     visit_path: str
-    adapter_run_id: RunId
-    operation: DefinitionReference
+    adapter_run_id: ids.RunId
+    operation: _continuation.DefinitionReference
     input: object
     prior_state: object
     request: _CallRequest
@@ -259,23 +183,25 @@ class _LiveCallFrame:
     child_error: Exception | None = None
     execution_request: _CallRequest | None = None
     target: _ResolvedLocalCall | None = None
-    timing: TimingSpan | None = None
+    timing: statistics_module.TimingSpan | None = None
     running_emitted: bool = False
     restored: bool = False
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _CallRequest:
     input: object
     params: object
     params_override: bool
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _ResolvedLocalCall:
-    definition: SubroutineDefinition[object, object, object, object]
-    scope: CallScope
-    project_root: Path
+    definition: declarations.SubroutineDefinition[
+        object, object, object, object
+    ]
+    scope: _calls.CallScope
+    project_root: pathlib.Path
     project_path: str
     params: object
 
@@ -290,9 +216,9 @@ class _CallReplayViolation(BaseException):
     """Unwinds authored code after a latched replay-control violation."""
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclasses.dataclass(slots=True, kw_only=True)
 class _CallReplayController:
-    node_id: NodeId
+    node_id: ids.NodeId
     request: _CallRequest
     child_output: object
     child_error: Exception | None
@@ -326,14 +252,14 @@ class _CallReplayController:
     def enforce(self) -> None:
         if self.violation is not None:
             code, message = self.violation
-            fault(self.node_id, code, message)
+            _errors.fault(self.node_id, code, message)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _CheckpointEmission:
-    kind: CheckpointKind
-    completed: Boundary | None
-    next: Boundary | None
+    kind: run_store.CheckpointKind
+    completed: run_store.Boundary | None
+    next: run_store.Boundary | None
     restore_available: bool
     branch_available: bool
     payload: bytes | None
@@ -344,40 +270,51 @@ class _CheckpointEmission:
 
     def __post_init__(self) -> None:
         if self.branch_available and not self.restore_available:
-            raise ValueError("a non-restorable checkpoint cannot preserve sessions")
+            raise ValueError(
+                "a non-restorable checkpoint cannot preserve sessions"
+            )
         if self.restore_available != (self.payload is not None):
             raise ValueError(
-                "checkpoint payload availability does not match restore availability"
+                "checkpoint payload availability does not match "
+                "restore availability"
             )
         if not self.restore_available and self.shards:
-            raise ValueError("a non-restorable checkpoint cannot carry child shards")
+            raise ValueError(
+                "a non-restorable checkpoint cannot carry child shards"
+            )
         if not self.restore_available and self.artifact_references is not None:
-            raise ValueError("a non-restorable checkpoint cannot reference artifacts")
+            raise ValueError(
+                "a non-restorable checkpoint cannot reference artifacts"
+            )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _ParameterRegistry:
-    values: Mapping[ParameterAddress, object]
+    values: Mapping[declarations.ParameterAddress, object]
 
     @classmethod
     def create(
         cls,
-        params_types: Mapping[ParameterAddress, ParameterType],
-        params: Mapping[ParameterAddress, object],
+        params_types: Mapping[
+            declarations.ParameterAddress, declarations.ParameterType
+        ],
+        params: Mapping[declarations.ParameterAddress, object],
         /,
         *,
         base: str = ".",
     ) -> _ParameterRegistry:
-        base = normalize_project_path(base)
-        relative_types: dict[ParameterAddress, ParameterType] = {}
+        base = _process.normalize_project_path(base)
+        relative_types: dict[
+            declarations.ParameterAddress, declarations.ParameterType
+        ] = {}
         for raw_address, params_type in params_types.items():
-            address = normalize_parameter_address(raw_address)
+            address = _process.normalize_parameter_address(raw_address)
             if address in relative_types:
                 raise ValueError(f"duplicate parameter address: {address!r}")
             relative_types[address] = params_type
-        relative_values: dict[ParameterAddress, object] = {}
+        relative_values: dict[declarations.ParameterAddress, object] = {}
         for raw_address, value in params.items():
-            address = normalize_parameter_address(raw_address)
+            address = _process.normalize_parameter_address(raw_address)
             if address in relative_values:
                 raise ValueError(f"duplicate parameter value: {address!r}")
             relative_values[address] = value
@@ -385,12 +322,17 @@ class _ParameterRegistry:
         if extra:
             raise ValueError(f"undeclared parameter value: {sorted(extra)!r}")
 
-        values: dict[ParameterAddress, object] = {}
+        values: dict[declarations.ParameterAddress, object] = {}
         for relative_address, params_type in relative_types.items():
             project_path, graph_id = relative_address
-            address = (compose_project_path(base, project_path), graph_id)
+            address = (
+                _process.compose_project_path(base, project_path),
+                graph_id,
+            )
             if address in values:
-                raise ValueError(f"duplicate normalized parameter address: {address!r}")
+                raise ValueError(
+                    f"duplicate normalized parameter address: {address!r}"
+                )
             if relative_address in relative_values:
                 value = relative_values[relative_address]
             else:
@@ -398,41 +340,46 @@ class _ParameterRegistry:
                     value = cast(Callable[[], object], params_type)()
                 except TypeError as error:
                     error.add_note(
-                        f"Verdog parameter value is missing: {relative_address!r}"
+                        f"Verdog parameter value is missing: "
+                        f"{relative_address!r}"
                     )
                     raise
             values[address] = value
-        return cls(MappingProxyType(values))
+        return cls(types.MappingProxyType(values))
 
     def value(
         self,
         project_path: str,
-        graph_id: GraphId,
+        graph_id: ids.GraphId,
         /,
     ) -> object:
-        address = (normalize_project_path(project_path), graph_id)
+        address = (_process.normalize_project_path(project_path), graph_id)
         if address not in self.values:
             raise ValueError(f"parameter declaration is missing: {address!r}")
         return self.values[address]
 
-    def snapshot(self) -> tuple[ParameterSlot, ...]:
+    def snapshot(self) -> tuple[_continuation.ParameterSlot, ...]:
         return tuple(
-            ParameterSlot(address=address, value=value)
+            _continuation.ParameterSlot(address=address, value=value)
             for address, value in sorted(self.values.items())
         )
 
     @classmethod
     def restore(
         cls,
-        params_types: Mapping[ParameterAddress, ParameterType],
-        slots: tuple[ParameterSlot, ...],
+        params_types: Mapping[
+            declarations.ParameterAddress, declarations.ParameterType
+        ],
+        slots: tuple[_continuation.ParameterSlot, ...],
         /,
         *,
         base: str = ".",
     ) -> _ParameterRegistry:
         expected = {
             (
-                compose_project_path(base, normalize_project_path(project_path)),
+                _process.compose_project_path(
+                    base, _process.normalize_project_path(project_path)
+                ),
                 graph_id,
             )
             for project_path, graph_id in params_types
@@ -444,11 +391,11 @@ class _ParameterRegistry:
                 f"definition: missing={sorted(expected - values.keys())!r} "
                 f"extra={sorted(values.keys() - expected)!r}"
             )
-        return cls(MappingProxyType(values))
+        return cls(types.MappingProxyType(values))
 
 
 def _encoded_id(value: str, /) -> str:
-    encoded = quote(value, safe="._-")
+    encoded = urllib.parse.quote(value, safe="._-")
     if not encoded:
         return "%00"
     trailing_dots = len(encoded) - len(encoded.rstrip("."))
@@ -461,7 +408,7 @@ def _encoded_id(value: str, /) -> str:
     return encoded
 
 
-def _contained(root: Path, relative: Path, /) -> Path:
+def _contained(root: pathlib.Path, relative: pathlib.Path, /) -> pathlib.Path:
     if relative.is_absolute():
         raise ValueError("output path must be relative")
     target = (root / relative).resolve()
@@ -480,19 +427,21 @@ def _attempt_number(name: str, /) -> int | None:
 
 
 def _run_compatibility(
-    project_root: Path,
-    checkpointing: CheckpointPolicy,
+    project_root: pathlib.Path,
+    checkpointing: run_store.CheckpointPolicy,
     supplied: Mapping[str, str] | None,
     /,
 ) -> Mapping[str, str]:
     if supplied is not None:
         return supplied
-    if checkpointing is CheckpointPolicy.OFF:
+    if checkpointing is run_store.CheckpointPolicy.OFF:
         return {}
-    return checkpoint_compatibility(project_root)
+    return _checkpoint_compatibility.checkpoint_compatibility(project_root)
 
 
-def _checkpoint_summary(store: RunStore, sequence: int, /) -> CheckpointSummary:
+def _checkpoint_summary(
+    store: run_store.RunStore, sequence: int, /
+) -> run_store.CheckpointSummary:
     summary = next(
         (item for item in store.checkpoints() if item.sequence == sequence),
         None,
@@ -503,11 +452,11 @@ def _checkpoint_summary(store: RunStore, sequence: int, /) -> CheckpointSummary:
 
 
 def _reuse_source_store(
-    output_dir: Path, supplied: RunStore | None, /
-) -> RunStore:
+    output_dir: pathlib.Path, supplied: run_store.RunStore | None, /
+) -> run_store.RunStore:
     output = output_dir.resolve()
     if supplied is None:
-        return RunStore.open(output)
+        return run_store.RunStore.open(output)
     if supplied.output_dir != output:
         raise ValueError(
             "source run store does not match the requested output directory"
@@ -515,7 +464,7 @@ def _reuse_source_store(
     return supplied
 
 
-def _latest_branchable_checkpoint(store: RunStore, /) -> int | None:
+def _latest_branchable_checkpoint(store: run_store.RunStore, /) -> int | None:
     return next(
         (
             item.sequence
@@ -530,27 +479,29 @@ def _fork_runtime_payload(
     payload: bytes,
     /,
     *,
-    run_id: RunId,
-    source_output: Path,
-    target_output: Path,
-    sessions: SessionPolicy,
-) -> tuple[bytes, ContinuationSnapshot]:
-    snapshot = fork_continuation(
-        decode_continuation(payload),
+    run_id: ids.RunId,
+    source_output: pathlib.Path,
+    target_output: pathlib.Path,
+    sessions: policies.SessionPolicy,
+) -> tuple[bytes, _continuation.ContinuationSnapshot]:
+    snapshot = _continuation.fork_continuation(
+        _continuation.decode_continuation(payload),
         run_id=run_id,
         source_output=source_output,
         target_output=target_output,
         sessions=sessions,
     )
-    return encode_continuation(snapshot), snapshot
+    return _continuation.encode_continuation(snapshot), snapshot
 
 
 def _summarize_sessions(
-    sessions: Iterable[tuple[str, SessionSnapshot | SessionResource]],
+    sessions: Iterable[
+        tuple[str, _continuation.SessionSnapshot | _agents.SessionResource]
+    ],
     /,
-) -> SessionState:
+) -> run_store.SessionState:
     persistent = 0
-    issues: list[SessionIssue] = []
+    issues: list[run_store.SessionIssue] = []
     for address, session in sessions:
         if not session.persistent:
             continue
@@ -562,7 +513,7 @@ def _summarize_sessions(
         if not session.tainted and not unavailable:
             continue
         issues.append(
-            SessionIssue(
+            run_store.SessionIssue(
                 address=address,
                 provider=session.provider or "unestablished",
                 code=(
@@ -577,7 +528,7 @@ def _summarize_sessions(
                 ),
             )
         )
-    return SessionState(
+    return run_store.SessionState(
         persistent=persistent,
         model="copy-on-write" if not issues else "legacy",
         branch_available=not issues,
@@ -585,21 +536,31 @@ def _summarize_sessions(
     )
 
 
-def _snapshot_session_state(snapshot: ContinuationSnapshot, /) -> SessionState:
+def _snapshot_session_state(
+    snapshot: _continuation.ContinuationSnapshot, /
+) -> run_store.SessionState:
     return _summarize_sessions(
         (session.resource_id, session) for session in snapshot.sessions
     )
 
 
-def _restart_session_payload(snapshot: ContinuationSnapshot, /) -> bytes:
-    if not snapshot.frames or not isinstance(snapshot.frames[0], GraphFrameSnapshot):
+def _restart_session_payload(
+    snapshot: _continuation.ContinuationSnapshot, /
+) -> bytes:
+    if not snapshot.frames or not isinstance(
+        snapshot.frames[0], _continuation.GraphFrameSnapshot
+    ):
         raise ValueError("checkpoint continuation has no root graph frame")
     bindings = snapshot.frames[0].session_bindings
     by_id = {session.resource_id: session for session in snapshot.sessions}
     referenced = sorted({resource_id for _, resource_id in bindings})
-    missing = [resource_id for resource_id in referenced if resource_id not in by_id]
+    missing = [
+        resource_id for resource_id in referenced if resource_id not in by_id
+    ]
     if missing:
-        raise ValueError(f"checkpoint root session resources are missing: {missing!r}")
+        raise ValueError(
+            f"checkpoint root session resources are missing: {missing!r}"
+        )
     value = {
         "format_version": _RESTART_SESSION_FORMAT,
         "bindings": [list(binding) for binding in bindings],
@@ -617,7 +578,59 @@ def _restart_session_payload(snapshot: ContinuationSnapshot, /) -> bytes:
             for session in (by_id[resource_id] for resource_id in referenced)
         ],
     }
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+
+
+def _restart_session_resource(
+    raw: object, /, *, require_copy_on_write: bool
+) -> tuple[str, _agents.SessionResource]:
+    """Decode a JSON session record before resolving bindings."""
+    if not isinstance(raw, dict):
+        raise ValueError("restart session checkpoint has an invalid session")
+    item = cast(dict[object, object], raw)
+    resource_id = item.get("resource_id")
+    persistent = item.get("persistent")
+    provider = item.get("provider")
+    provider_session_id = item.get("provider_session_id")
+    access = item.get("access")
+    copy_on_write = item.get("copy_on_write")
+    branch_supported = item.get("branch_supported")
+    tainted = item.get("tainted")
+    if (
+        not isinstance(resource_id, str)
+        or not resource_id
+        or not isinstance(persistent, bool)
+        or (provider is not None and not isinstance(provider, str))
+        or (
+            provider_session_id is not None
+            and not isinstance(provider_session_id, str)
+        )
+        or (access is not None and not isinstance(access, str))
+        or not isinstance(copy_on_write, bool)
+        or (
+            branch_supported is not None
+            and not isinstance(branch_supported, bool)
+        )
+        or not isinstance(tainted, bool)
+    ):
+        raise ValueError("restart session checkpoint has an invalid session")
+    resource = _agents.SessionResource(
+        persistent=persistent,
+        provider=provider,
+        provider_session_id=(
+            None
+            if provider_session_id is None
+            else ids.ProviderSessionId(provider_session_id)
+        ),
+        access=None if access is None else declarations.AgentAccess(access),
+        copy_on_write=copy_on_write,
+        require_copy_on_write=require_copy_on_write,
+        branch_supported=branch_supported,
+        tainted=tainted,
+    )
+    return resource_id, resource
 
 
 def _restart_session_seed(
@@ -625,11 +638,13 @@ def _restart_session_seed(
     /,
     *,
     require_copy_on_write: bool,
-) -> Mapping[str, SessionResource]:
+) -> Mapping[str, _agents.SessionResource]:
     try:
         decoded: object = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("restart session checkpoint is invalid JSON") from error
+        raise ValueError(
+            "restart session checkpoint is invalid JSON"
+        ) from error
     if not isinstance(decoded, dict):
         raise ValueError("restart session checkpoint must be an object")
     body = cast(dict[object, object], decoded)
@@ -640,51 +655,18 @@ def _restart_session_seed(
     if not isinstance(raw_bindings, list) or not isinstance(raw_sessions, list):
         raise ValueError("restart session checkpoint has invalid collections")
 
-    stored: dict[str, SessionResource] = {}
+    stored: dict[str, _agents.SessionResource] = {}
     for raw in cast(list[object], raw_sessions):
-        if not isinstance(raw, dict):
-            raise ValueError("restart session checkpoint has an invalid session")
-        item = cast(dict[object, object], raw)
-        resource_id = item.get("resource_id")
-        persistent = item.get("persistent")
-        provider = item.get("provider")
-        provider_session_id = item.get("provider_session_id")
-        access = item.get("access")
-        copy_on_write = item.get("copy_on_write")
-        branch_supported = item.get("branch_supported")
-        tainted = item.get("tainted")
-        if (
-            not isinstance(resource_id, str)
-            or not resource_id
-            or resource_id in stored
-            or not isinstance(persistent, bool)
-            or (provider is not None and not isinstance(provider, str))
-            or (
-                provider_session_id is not None
-                and not isinstance(provider_session_id, str)
-            )
-            or (access is not None and not isinstance(access, str))
-            or not isinstance(copy_on_write, bool)
-            or (branch_supported is not None and not isinstance(branch_supported, bool))
-            or not isinstance(tainted, bool)
-        ):
-            raise ValueError("restart session checkpoint has an invalid session")
-        stored[resource_id] = SessionResource(
-            persistent=persistent,
-            provider=provider,
-            provider_session_id=(
-                None
-                if provider_session_id is None
-                else ProviderSessionId(provider_session_id)
-            ),
-            access=None if access is None else AgentAccess(access),
-            copy_on_write=copy_on_write,
-            require_copy_on_write=require_copy_on_write,
-            branch_supported=branch_supported,
-            tainted=tainted,
+        resource_id, resource = _restart_session_resource(
+            raw, require_copy_on_write=require_copy_on_write
         )
+        if resource_id in stored:
+            raise ValueError(
+                "restart session checkpoint has an invalid session"
+            )
+        stored[resource_id] = resource
 
-    seeded: dict[str, SessionResource] = {}
+    seeded: dict[str, _agents.SessionResource] = {}
     for raw in cast(list[object], raw_bindings):
         if (
             not isinstance(raw, list)
@@ -694,29 +676,33 @@ def _restart_session_seed(
             or raw[0] in seeded
             or raw[1] not in stored
         ):
-            raise ValueError("restart session checkpoint has an invalid binding")
+            raise ValueError(
+                "restart session checkpoint has an invalid binding"
+            )
         seeded[raw[0]] = stored[raw[1]]
-    return MappingProxyType(seeded)
+    return types.MappingProxyType(seeded)
 
 
-@dataclass(slots=True)
+@dataclasses.dataclass(slots=True)
 class _GraphOutput:
-    root: Path
-    relative: Path
-    graph_id: GraphId
+    root: pathlib.Path
+    relative: pathlib.Path
+    graph_id: ids.GraphId
     project_path: str
-    statistics: RunStatistics
-    report_relative: Path
-    visits: dict[NodeId, int] = field(default_factory=dict[NodeId, int])
+    statistics: statistics_module.RunStatistics
+    report_relative: pathlib.Path
+    visits: dict[ids.NodeId, int] = dataclasses.field(
+        default_factory=dict[ids.NodeId, int]
+    )
 
     @classmethod
     def create(
         cls,
-        root: Path,
-        parent: Path,
-        graph_id: GraphId,
+        root: pathlib.Path,
+        parent: pathlib.Path,
+        graph_id: ids.GraphId,
         project_path: str,
-        statistics: RunStatistics,
+        statistics: statistics_module.RunStatistics,
         /,
     ) -> _GraphOutput:
         directory = _contained(root, parent)
@@ -727,19 +713,21 @@ class _GraphOutput:
     @classmethod
     def restore(
         cls,
-        root: Path,
-        relative: Path,
-        graph: GraphDefinition[Any, Any, Any, Any],
+        root: pathlib.Path,
+        relative: pathlib.Path,
+        graph: declarations.GraphDefinition[Any, Any, Any, Any],
         project_path: str,
-        statistics: RunStatistics,
-        visits: Mapping[NodeId, int],
+        statistics: statistics_module.RunStatistics,
+        visits: Mapping[ids.NodeId, int],
         /,
         *,
-        report_relative: Path,
+        report_relative: pathlib.Path,
     ) -> _GraphOutput:
         directory = _contained(root, relative)
         if not directory.is_dir() or directory.is_symlink():
-            raise ValueError(f"checkpoint graph output is unavailable: {directory}")
+            raise ValueError(
+                f"checkpoint graph output is unavailable: {directory}"
+            )
         restored = dict(visits)
         node_ids = (
             graph.enter.id,
@@ -753,21 +741,34 @@ class _GraphOutput:
                 continue
             maximum = 0
             for visit_directory in node_directory.iterdir():
-                if not visit_directory.is_dir() or not visit_directory.name.isdigit():
+                if (
+                    not visit_directory.is_dir()
+                    or not visit_directory.name.isdigit()
+                ):
                     continue
                 maximum = max(maximum, int(visit_directory.name))
             if maximum:
                 restored[node_id] = max(restored.get(node_id, 0), maximum)
         return cls(
-            root, relative, graph.id, project_path, statistics, report_relative, restored
+            root,
+            relative,
+            graph.id,
+            project_path,
+            statistics,
+            report_relative,
+            restored,
         )
 
-    def visit(self, node_id: NodeId, /) -> Path:
+    def visit(self, node_id: ids.NodeId, /) -> pathlib.Path:
         node_relative = self.relative / _encoded_id(str(node_id))
         directory = _contained(self.root, node_relative)
         if node_id not in self.visits and directory.is_dir():
             self.visits[node_id] = max(
-                (int(path.name) for path in directory.iterdir() if path.name.isdecimal()),
+                (
+                    int(path.name)
+                    for path in directory.iterdir()
+                    if path.name.isdecimal()
+                ),
                 default=0,
             )
         visit = self.visits.get(node_id, 0) + 1
@@ -784,12 +785,12 @@ class _GraphOutput:
 
     def start_node(
         self,
-        node_id: NodeId,
+        node_id: ids.NodeId,
         node_type: str,
         /,
         *,
-        status: TimingStatus = "succeeded",
-    ) -> tuple[Path, TimingSpan]:
+        status: statistics_module.TimingStatus = "succeeded",
+    ) -> tuple[pathlib.Path, statistics_module.TimingSpan]:
         output_dir = self.visit(node_id)
         timing = self.statistics.start(
             path=output_dir.relative_to(self.root).as_posix(),
@@ -801,22 +802,28 @@ class _GraphOutput:
         )
         return output_dir, timing
 
-    @contextmanager
+    @contextlib.contextmanager
     def node(
-        self, node_id: NodeId, node_type: str, *, status: TimingStatus = "succeeded"
-    ) -> Generator[Path]:
+        self,
+        node_id: ids.NodeId,
+        node_type: str,
+        *,
+        status: statistics_module.TimingStatus = "succeeded",
+    ) -> Generator[pathlib.Path]:
         output_dir, timing = self.start_node(node_id, node_type, status=status)
         try:
             yield output_dir
         except BaseException as error:
             timing.finish(
-                "cancelled" if isinstance(error, ExecutionCancelled) else "failed"
+                "cancelled"
+                if isinstance(error, cancellation_module.ExecutionCancelled)
+                else "failed"
             )
             raise
         else:
             timing.finish()
 
-    def latest(self, node_id: NodeId, /) -> Path | None:
+    def latest(self, node_id: ids.NodeId, /) -> pathlib.Path | None:
         visit = self.visits.get(node_id)
         if visit is None:
             return None
@@ -825,15 +832,19 @@ class _GraphOutput:
 
 
 def initial_workflow_state(
-    graph: GraphDefinition[Any, Any, Any, ScopeT],
+    graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
     /,
-) -> WorkflowState[ScopeT]:
-    owners: tuple[NodeDefinition[Any, ScopeT], ...] = tuple(
-        node for node in graph.nodes if not isinstance(node, FeatureNodeDefinition)
+) -> declarations.WorkflowState[ScopeT]:
+    """Initialize node records, leaving feature values uninitialized."""
+    owners: tuple[declarations.NodeDefinition[Any, ScopeT], ...] = tuple(
+        node
+        for node in graph.nodes
+        if not isinstance(node, declarations.FeatureNodeDefinition)
     )
     initial: list[
         tuple[
-            NodeDefinition[Any, ScopeT] | FeatureDefinition[Any, ScopeT],
+            declarations.NodeDefinition[Any, ScopeT]
+            | declarations.FeatureDefinition[Any, ScopeT],
             object,
         ]
     ] = []
@@ -842,13 +853,13 @@ def initial_workflow_state(
             value = owner.state_type()
             if type(value) is not owner.state_type:
                 raise TypeError("constructed state has the wrong type")
-            require_immutable_state(value)
+            validation.require_immutable_state(value)
         except Exception as error:
             error.add_note(f"Verdog state initialization: node={owner.id}")
             raise
         initial.append((owner, value))
     initial.extend((feature, None) for feature in graph.features)
-    return WorkflowState[ScopeT]._initial(  # pyright: ignore[reportPrivateUsage]
+    return declarations.WorkflowState[ScopeT]._initial(  # pyright: ignore[reportPrivateUsage]
         initial
     )
 
@@ -861,56 +872,83 @@ class Dispatcher:
         *,
         execution_handler: ExecutionHandler | None = None,
         transition_limit: int = 10_000,
-        cancellation: CancellationToken | None = None,
-        project_root: Path | str | None = None,
-        _statistics: RunStatistics | None = None,
+        cancellation: cancellation_module.CancellationToken | None = None,
+        project_root: pathlib.Path | str | None = None,
+        _statistics: statistics_module.RunStatistics | None = None,
     ) -> None:
+        """Create an executor with a shared cancellation and transition budget.
+
+        Args:
+            execution_handler: Optional observer called for node and edge
+                events.
+            transition_limit: Maximum graph transitions across the execution.
+            cancellation: A caller-owned token; otherwise a fresh token is
+                created.
+            project_root: Owning project directory, defaulting to the current
+                directory.
+            _statistics: Internal statistics owner shared by nested executions.
+        """
         if transition_limit <= 0:
             raise ValueError("transition_limit must be positive")
-        self._root_resource_arguments = NO_RESOURCES
+        self._root_resource_arguments = _agents.NO_RESOURCES
         self._execution_handler = execution_handler
         self._transition_limit = transition_limit
-        self._cancellation = cancellation or CancellationToken()
-        self._project_root = Path.cwd() if project_root is None else Path(project_root)
+        self._cancellation = (
+            cancellation or cancellation_module.CancellationToken()
+        )
+        self._project_root = (
+            pathlib.Path.cwd()
+            if project_root is None
+            else pathlib.Path(project_root)
+        )
         self._statistics = _statistics
-        self._checkpointing = CheckpointPolicy.OFF
-        self._run_store: RunStore | None = None
-        self._checkpoint_handler: Callable[[_CheckpointEmission], None] | None = None
+        self._checkpointing = run_store.CheckpointPolicy.OFF
+        self._run_store: run_store.RunStore | None = None
+        self._checkpoint_handler: (
+            Callable[[_CheckpointEmission], None] | None
+        ) = None
         self._checkpoint_by_reference = False
-        self._artifact_cache: ArtifactCache = {}
-        self._previous_artifacts: ArtifactReferences | None = None
-        self._resume_checkpoint_shards: Mapping[str, bytes] = MappingProxyType({})
+        self._artifact_cache: _artifact_references.ArtifactCache = {}
+        self._previous_artifacts: (
+            _artifact_references.ArtifactReferences | None
+        ) = None
+        self._resume_checkpoint_shards: Mapping[str, bytes] = (
+            types.MappingProxyType({})
+        )
         self._resume_checkpoint_sequence: int | None = None
         self._retry_incomplete = False
         self._continuation_frames: list[_LiveGraphFrame | _LiveCallFrame] = []
-        self._root_session_seed: Mapping[str, SessionResource] | None = None
+        self._root_session_seed: (
+            Mapping[str, _agents.SessionResource] | None
+        ) = None
         self._parameter_registry: _ParameterRegistry | None = None
-        self._activation_root = Path()
+        self._activation_root = pathlib.Path()
 
     def _configure_invocation_journal(
         self,
-        output_root: Path,
+        output_root: pathlib.Path,
         /,
         *,
         retry_incomplete: bool = False,
     ) -> None:
-        """Attach run-owned provider recovery state to every local graph resource."""
-
+        """Attach provider recovery state to local graph resources."""
         self._retry_incomplete = retry_incomplete
-        if self._checkpointing is CheckpointPolicy.OFF:
+        if self._checkpointing is run_store.CheckpointPolicy.OFF:
             return
         current = self._root_resource_arguments
-        self._root_resource_arguments = Resources(
+        self._root_resource_arguments = _agents.Resources(
             current.profiles,
             current.sessions,
-            InvocationJournal(
+            _invocations.InvocationJournal(
                 output_root,
                 retry_incomplete=retry_incomplete,
             ),
         )
 
     @staticmethod
-    def _exception_members(error: BaseException, /) -> tuple[BaseException, ...]:
+    def _exception_members(
+        error: BaseException, /
+    ) -> tuple[BaseException, ...]:
         pending = [error]
         members: list[BaseException] = []
         seen: set[int] = set()
@@ -930,7 +968,9 @@ class Dispatcher:
         return tuple(members)
 
     @classmethod
-    def _checkpoint_exception(cls, error: Exception | None, /) -> Exception | None:
+    def _checkpoint_exception(
+        cls, error: Exception | None, /
+    ) -> Exception | None:
         if error is None:
             return None
         members = cls._exception_members(error)
@@ -940,7 +980,9 @@ class Dispatcher:
                 member.__traceback__ = None
             copied: object = cloudpickle.loads(cloudpickle.dumps(error))
         finally:
-            for member, active_traceback in zip(members, tracebacks, strict=True):
+            for member, active_traceback in zip(
+                members, tracebacks, strict=True
+            ):
                 member.__traceback__ = active_traceback
         if not isinstance(copied, Exception):
             raise TypeError("copied child error has the wrong type")
@@ -950,15 +992,17 @@ class Dispatcher:
 
     def _snapshot_continuation(
         self,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         /,
-    ) -> ContinuationSnapshot:
+    ) -> _continuation.ContinuationSnapshot:
         if self._parameter_registry is None:
             raise RuntimeError("checkpoint execution has no parameter registry")
         resource_ids: dict[int, str] = {}
-        sessions: list[SessionSnapshot] = []
-        frames: list[GraphFrameSnapshot | CallFrameSnapshot] = []
+        sessions: list[_continuation.SessionSnapshot] = []
+        frames: list[
+            _continuation.GraphFrameSnapshot | _continuation.CallFrameSnapshot
+        ] = []
         for frame in self._continuation_frames:
             if isinstance(frame, _LiveCallFrame):
                 frames.append(self._call_snapshot(frame))
@@ -971,7 +1015,7 @@ class Dispatcher:
                     resource_id = f"session-{len(resource_ids) + 1:06d}"
                     resource_ids[identity] = resource_id
                     sessions.append(
-                        SessionSnapshot(
+                        _continuation.SessionSnapshot(
                             resource_id=resource_id,
                             persistent=resource.persistent,
                             provider=resource.provider,
@@ -985,9 +1029,12 @@ class Dispatcher:
                                 if resource.access is None
                                 else resource.access.value
                             ),
-                            # A committed provider anchor is immutable.  The live
-                            # resource may already have consumed its previous COW
-                            # flag, but every independently restorable checkpoint
+                            # A committed provider anchor is immutable.  The
+                            # live
+                            # resource may already have consumed its previous
+                            # COW
+                            # flag, but every independently restorable
+                            # checkpoint
                             # must fork again on its first later invocation.
                             copy_on_write=(
                                 resource.persistent
@@ -1001,7 +1048,7 @@ class Dispatcher:
                     )
                 bindings.append((str(session_id), resource_id))
             frames.append(
-                GraphFrameSnapshot(
+                _continuation.GraphFrameSnapshot(
                     frame_id=frame.frame_id,
                     definition=frame.definition,
                     scope_current=frame.scope.current,
@@ -1012,19 +1059,20 @@ class Dispatcher:
                     entry_input=frame.entry_input,
                     params=frame.params,
                     value=frame.value,
-                    state=snapshot_workflow_state(frame.state),
+                    state=_continuation.snapshot_workflow_state(frame.state),
                     control=frame.control,
                     visits=tuple(
                         sorted(
-                            frame.graph_output.visits.items(), key=lambda item: item[0]
+                            frame.graph_output.visits.items(),
+                            key=lambda item: item[0],
                         )
                     ),
                     session_bindings=tuple(sorted(bindings)),
                     statistics=frame.graph_output.statistics.snapshot(),
                 )
             )
-        return ContinuationSnapshot(
-            format_version=CONTINUATION_FORMAT_VERSION,
+        return _continuation.ContinuationSnapshot(
+            format_version=_continuation.FORMAT_VERSION,
             run_id=run_id,
             transitions_remaining=budget.remaining,
             frames=tuple(frames),
@@ -1032,9 +1080,9 @@ class Dispatcher:
             parameters=self._parameter_registry.snapshot(),
         )
 
-    def _session_state(self) -> SessionState:
+    def _session_state(self) -> run_store.SessionState:
         seen: set[int] = set()
-        sessions: list[tuple[str, SessionResource]] = []
+        sessions: list[tuple[str, _agents.SessionResource]] = []
         for frame in self._continuation_frames:
             if isinstance(frame, _LiveCallFrame):
                 continue
@@ -1048,7 +1096,6 @@ class Dispatcher:
 
     def _rearm_checkpoint_sessions(self) -> None:
         """Make the just-committed provider anchors copy-on-write again."""
-
         seen: set[int] = set()
         for frame in self._continuation_frames:
             if isinstance(frame, _LiveCallFrame):
@@ -1068,11 +1115,11 @@ class Dispatcher:
 
     def _prepare_checkpoint_emission(
         self,
-        run_id: RunId,
-        budget: Budget,
-        kind: CheckpointKind,
-        completed: Boundary | None,
-        next_boundary: Boundary | None,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
+        kind: run_store.CheckpointKind,
+        completed: run_store.Boundary | None,
+        next_boundary: run_store.Boundary | None,
         /,
         *,
         restorable: bool,
@@ -1080,7 +1127,7 @@ class Dispatcher:
         unavailable_reason: str | None,
         extra_shards: Mapping[str, bytes],
         nested_branch_available: bool,
-    ) -> tuple[_CheckpointEmission, SessionState]:
+    ) -> tuple[_CheckpointEmission, run_store.SessionState]:
         payload: bytes | None = None
         checkpoint_shards = extra_shards
         if restorable:
@@ -1089,7 +1136,7 @@ class Dispatcher:
                 payload = (
                     pickle.dumps(snapshot)
                     if self._checkpoint_by_reference
-                    else encode_continuation(snapshot)
+                    else _continuation.encode_continuation(snapshot)
                 )
                 checkpoint_shards = {
                     **extra_shards,
@@ -1102,7 +1149,9 @@ class Dispatcher:
                 unavailable_code = "checkpoint.serialization_failed"
                 unavailable_reason = str(error)
         session_state = self._session_state()
-        branch_available = session_state.branch_available and nested_branch_available
+        branch_available = (
+            session_state.branch_available and nested_branch_available
+        )
         return (
             _CheckpointEmission(
                 kind=kind,
@@ -1111,7 +1160,9 @@ class Dispatcher:
                 restore_available=restorable,
                 branch_available=restorable and branch_available,
                 payload=payload,
-                shards=(checkpoint_shards if restorable else _NO_CHECKPOINT_SHARDS),
+                shards=(
+                    checkpoint_shards if restorable else _NO_CHECKPOINT_SHARDS
+                ),
                 unavailable_code=None if restorable else unavailable_code,
                 unavailable_reason=None if restorable else unavailable_reason,
             ),
@@ -1123,10 +1174,10 @@ class Dispatcher:
         sequence: int,
         emission: _CheckpointEmission,
         /,
-    ) -> CheckpointSummary:
-        return CheckpointSummary(
+    ) -> run_store.CheckpointSummary:
+        return run_store.CheckpointSummary(
             sequence=sequence,
-            created_at=utc_now(),
+            created_at=run_store.utc_now(),
             kind=emission.kind,
             completed=emission.completed,
             next=emission.next,
@@ -1139,9 +1190,9 @@ class Dispatcher:
 
     def _commit_checkpoint_emission(
         self,
-        store: RunStore,
+        store: run_store.RunStore,
         emission: _CheckpointEmission,
-        session_state: SessionState,
+        session_state: run_store.SessionState,
         /,
     ) -> _CheckpointEmission:
         sequence = store.next_checkpoint_sequence()
@@ -1158,7 +1209,7 @@ class Dispatcher:
                 sessions=session_state,
                 artifact_references=emission.artifact_references,
             )
-        except RunStoreError as error:
+        except run_store.RunStoreError as error:
             if not error.code.startswith("checkpoint.artifact_"):
                 raise
             # Artifact paths are part of an exact fork. In automatic mode a bad
@@ -1175,7 +1226,7 @@ class Dispatcher:
                 unavailable_code="checkpoint.artifact_capture_failed",
                 unavailable_reason=str(error),
             )
-            unavailable = replace(
+            unavailable = dataclasses.replace(
                 summary,
                 restore_available=False,
                 fork_with_branch_available=False,
@@ -1186,8 +1237,10 @@ class Dispatcher:
             store.commit_checkpoint(unavailable, sessions=session_state)
         return emission
 
-    def _require_checkpoint_policy(self, emission: _CheckpointEmission, /) -> None:
-        if self._checkpointing is not CheckpointPolicy.REQUIRED:
+    def _require_checkpoint_policy(
+        self, emission: _CheckpointEmission, /
+    ) -> None:
+        if self._checkpointing is not run_store.CheckpointPolicy.REQUIRED:
             return
         if not emission.restore_available:
             raise RuntimeError(
@@ -1202,11 +1255,11 @@ class Dispatcher:
 
     def _checkpoint(
         self,
-        run_id: RunId,
-        budget: Budget,
-        kind: CheckpointKind,
-        completed: Boundary | None,
-        next_boundary: Boundary | None,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
+        kind: run_store.CheckpointKind,
+        completed: run_store.Boundary | None,
+        next_boundary: run_store.Boundary | None,
         /,
         *,
         restorable: bool = True,
@@ -1216,14 +1269,19 @@ class Dispatcher:
         nested_branch_available: bool = True,
         artifact_references: dict[str, object] | None = None,
     ) -> None:
-        if self._checkpointing is CheckpointPolicy.OFF:
+        if self._checkpointing is run_store.CheckpointPolicy.OFF:
             return
         if self._run_store is None and self._checkpoint_handler is None:
             return
         if self._run_store is not None and self._checkpoint_handler is not None:
             raise RuntimeError("checkpoint output has two owners")
-        if "runtime.pkl" in extra_shards or _RESTART_SESSION_SHARD in extra_shards:
-            raise ValueError("checkpoint child shards cannot replace runtime metadata")
+        if (
+            "runtime.pkl" in extra_shards
+            or _RESTART_SESSION_SHARD in extra_shards
+        ):
+            raise ValueError(
+                "checkpoint child shards cannot replace runtime metadata"
+            )
         emission, session_state = self._prepare_checkpoint_emission(
             run_id,
             budget,
@@ -1240,23 +1298,33 @@ class Dispatcher:
             try:
                 if artifact_references is None:
                     if self._run_store is not None:
-                        artifact_references = self._run_store.capture_artifacts()
+                        artifact_references = (
+                            self._run_store.capture_artifacts()
+                        )
                     else:
                         if self._statistics is None:
-                            raise RuntimeError("checkpoint has no artifact root")
-                        artifact_references = capture_artifacts(
-                            self._statistics.root,
-                            cache=self._artifact_cache,
-                            previous=self._previous_artifacts,
+                            raise RuntimeError(
+                                "checkpoint has no artifact root"
+                            )
+                        artifact_references = (
+                            _artifact_references.capture_artifacts(
+                                self._statistics.root,
+                                cache=self._artifact_cache,
+                                previous=self._previous_artifacts,
+                            )
                         )
-                self._previous_artifacts = decode_artifact_references(
-                    artifact_references, Path("checkpoint")
+                self._previous_artifacts = (
+                    _artifact_references.decode_artifact_references(
+                        artifact_references, pathlib.Path("checkpoint")
+                    )
                 )
-                emission = replace(emission, artifact_references=artifact_references)
-            except RunStoreError as error:
+                emission = dataclasses.replace(
+                    emission, artifact_references=artifact_references
+                )
+            except run_store.RunStoreError as error:
                 if not error.code.startswith("checkpoint.artifact_"):
                     raise
-                emission = replace(
+                emission = dataclasses.replace(
                     emission,
                     restore_available=False,
                     branch_available=False,
@@ -1284,11 +1352,11 @@ class Dispatcher:
     @staticmethod
     def _boundary(
         graph_output: _GraphOutput,
-        node_id: NodeId,
+        node_id: ids.NodeId,
         visit: int,
         /,
-    ) -> Boundary:
-        return Boundary(
+    ) -> run_store.Boundary:
+        return run_store.Boundary(
             project_path=graph_output.project_path,
             graph=str(graph_output.graph_id),
             node=str(node_id),
@@ -1303,9 +1371,9 @@ class Dispatcher:
     def _accept_remote_checkpoint(
         self,
         call: _LiveCallFrame,
-        frame: RemoteCheckpointFrame,
-        run_id: RunId,
-        budget: Budget,
+        frame: _protocol.CheckpointFrame,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         /,
     ) -> None:
         if call.phase != "child_active" or call.operation.kind != "workflow":
@@ -1318,7 +1386,7 @@ class Dispatcher:
         child_payload = (
             None
             if frame.continuation is None
-            else decode_binary_payload(frame.continuation)
+            else _protocol.decode_binary_payload(frame.continuation)
         )
         self._checkpoint(
             run_id,
@@ -1343,24 +1411,29 @@ class Dispatcher:
         payload = self._resume_checkpoint_shards.get(name)
         if payload is not None:
             return payload
-        if self._run_store is not None and self._resume_checkpoint_sequence is not None:
+        if (
+            self._run_store is not None
+            and self._resume_checkpoint_sequence is not None
+        ):
             return self._run_store.checkpoint_shard(
                 self._resume_checkpoint_sequence,
                 name,
             )
         raise ValueError("checkpoint remote child continuation is unavailable")
 
-    @contextmanager
+    @contextlib.contextmanager
     def _lifecycle_execution(
         self,
-        output_root: Path,
-        store: RunStore | None,
+        output_root: pathlib.Path,
+        store: run_store.RunStore | None,
         /,
         *,
         mark_running: bool = False,
     ) -> Generator[_LifecycleExecutor, None, None]:
-        reports = InvocationReports(output_root)
-        self._statistics = RunStatistics(output_root, record_handler=reports)
+        reports = _configuration.InvocationReports(output_root)
+        self._statistics = statistics_module.RunStatistics(
+            output_root, record_handler=reports
+        )
 
         def execute(
             operation: Callable[[], LifecycleResultT], /
@@ -1370,49 +1443,91 @@ class Dispatcher:
             except BaseException as error:
                 if store is not None:
                     interrupted = isinstance(
-                        error, (ExecutionCancelled, KeyboardInterrupt)
+                        error,
+                        (
+                            cancellation_module.ExecutionCancelled,
+                            KeyboardInterrupt,
+                        ),
                     )
                     store.update(
                         status=(
-                            RunStatus.INTERRUPTED
+                            run_store.RunStatus.INTERRUPTED
                             if interrupted
-                            else RunStatus.FAILED
+                            else run_store.RunStatus.FAILED
                         )
                     )
                 raise
             else:
                 if store is not None:
-                    store.update(status=RunStatus.SUCCEEDED)
+                    store.update(status=run_store.RunStatus.SUCCEEDED)
                 return result
 
         try:
             if mark_running:
                 if store is None:
-                    raise RuntimeError("a resumed execution requires a run store")
-                store.update(status=RunStatus.RUNNING)
+                    raise RuntimeError(
+                        "a resumed execution requires a run store"
+                    )
+                store.update(status=run_store.RunStatus.RUNNING)
             yield execute
         finally:
             reports.finish()
 
     def run(
         self,
-        definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
+        definition: declarations.WorkflowDefinition[
+            InputT, OutputT, ParamsT, ScopeT
+        ],
         input: InputT,
         /,
         *,
-        output_dir: Path,
-        params: Mapping[ParameterAddress, object] = _NO_PARAMETERS,
-        run_id: RunId | None = None,
+        output_dir: pathlib.Path,
+        params: Mapping[declarations.ParameterAddress, object] = _NO_PARAMETERS,
+        run_id: ids.RunId | None = None,
         runtime_options: object = None,
-        checkpointing: CheckpointPolicy = CheckpointPolicy.OFF,
+        checkpointing: run_store.CheckpointPolicy = (
+            run_store.CheckpointPolicy.OFF
+        ),
         workflow_arguments: Sequence[str] = (),
-        _run_store: RunStore | None = None,
+        _run_store: run_store.RunStore | None = None,
         _record_run: bool = False,
-        _parent: ParentRun | None = None,
+        _parent: run_store.ParentRun | None = None,
         _compatibility: Mapping[str, str] | None = None,
-        _session_seed: Mapping[str, SessionResource] | None = None,
-    ) -> Success[OutputT, WorkflowState[ScopeT]]:
-        root, scope = workflow_subroutine(
+        _session_seed: Mapping[str, _agents.SessionResource] | None = None,
+    ) -> declarations.Success[OutputT, declarations.WorkflowState[ScopeT]]:
+        """Execute a workflow into an empty output directory.
+
+        Args:
+            definition: Workflow entry point and declared resource
+                configuration.
+            input: Input value satisfying the workflow input contract.
+            output_dir: New or empty directory for reports and checkpoint
+                metadata.
+            params: Parameter overrides indexed by project path and graph ID.
+            run_id: Optional stable identity; otherwise a UUID is generated.
+            runtime_options: Values recorded alongside input in configuration
+                reports.
+            checkpointing: Policy controlling durable continuation capture.
+            workflow_arguments: Original launch arguments retained for restarts.
+            _run_store: Internal run metadata owner when execution is already
+                recorded.
+            _record_run: Record lifecycle metadata even when checkpoints are
+                disabled.
+            _parent: Internal provenance for a forked or restarted run.
+            _compatibility: Internal source fingerprints supplied by a parent
+                launch.
+            _session_seed: Restored root sessions used when restarting a run.
+
+        Returns:
+            Successful output and the final immutable workflow state.
+
+        Raises:
+            ValueError: If declarations, parameters, or the output directory are
+                invalid.
+            ExecutionCancelled: If the cancellation token or deadline stops
+                execution.
+        """
+        root, scope = _calls.workflow_subroutine(
             self._project_root,
             definition,
         )
@@ -1427,14 +1542,15 @@ class Dispatcher:
         else:
             output_root.mkdir(parents=True)
         (output_root / "trace.log").touch(exist_ok=False)
-        identifier = run_id or RunId(str(uuid4()))
-        self._checkpointing = CheckpointPolicy(checkpointing)
+        identifier = run_id or ids.RunId(str(uuid.uuid4()))
+        self._checkpointing = run_store.CheckpointPolicy(checkpointing)
         self._run_store = _run_store
         self._root_session_seed = _session_seed
         if (
-            self._checkpointing is not CheckpointPolicy.OFF or _record_run
+            self._checkpointing is not run_store.CheckpointPolicy.OFF
+            or _record_run
         ) and self._run_store is None:
-            self._run_store = RunStore.create(
+            self._run_store = run_store.RunStore.create(
                 output_root,
                 project_root=self._project_root,
                 workflow_id=str(definition.id),
@@ -1451,118 +1567,135 @@ class Dispatcher:
                 ),
             )
         self._configure_invocation_journal(output_root)
-        budget = Budget(self._transition_limit)
+        budget = _calls.Budget(self._transition_limit)
         registry = _ParameterRegistry.create(
             definition.params_types,
             params,
         )
-        launch_values = (ConfigurationValue("input", input),)
+        launch_values = (_configuration.ConfigurationValue("input", input),)
         if runtime_options is not None:
-            launch_values += (ConfigurationValue("runtime", runtime_options),)
-        lease = nullcontext() if self._run_store is None else self._run_store.lease()
+            launch_values += (
+                _configuration.ConfigurationValue("runtime", runtime_options),
+            )
+        lease = (
+            contextlib.nullcontext()
+            if self._run_store is None
+            else self._run_store.lease()
+        )
         try:
-            with self._lifecycle_execution(
-                output_root, self._run_store
-            ) as execute:
-                with lease:
-                    result = execute(
-                        lambda: self._run_graph(
-                            graph,
-                            scope,
-                            input,
-                            identifier,
-                            budget,
-                            output_root,
-                            Path(),
-                            ".",
-                            registry,
-                            self._root_resource_arguments,
-                            definition_reference=DefinitionReference(
-                                kind="subroutine",
-                                id=definition.entry.definition_id,
-                                module=definition.entry.definition_module,
-                                project_path=definition.entry.project_path,
-                            ),
-                            entry_values=launch_values,
-                        )
+            with (
+                self._lifecycle_execution(
+                    output_root, self._run_store
+                ) as execute,
+                lease,
+            ):
+                result = execute(
+                    lambda: self._run_graph(
+                        graph,
+                        scope,
+                        input,
+                        identifier,
+                        budget,
+                        output_root,
+                        pathlib.Path(),
+                        ".",
+                        registry,
+                        self._root_resource_arguments,
+                        definition_reference=_continuation.DefinitionReference(
+                            kind="subroutine",
+                            id=definition.entry.definition_id,
+                            module=definition.entry.definition_module,
+                            project_path=definition.entry.project_path,
+                        ),
+                        entry_values=launch_values,
                     )
+                )
         finally:
             self._root_session_seed = None
-        return cast(Success[OutputT, WorkflowState[ScopeT]], result)
+        return cast(
+            declarations.Success[OutputT, declarations.WorkflowState[ScopeT]],
+            result,
+        )
 
     def _restore_session_resources(
         self,
-        snapshot: ContinuationSnapshot,
+        snapshot: _continuation.ContinuationSnapshot,
         /,
-    ) -> Mapping[str, SessionResource]:
-        stored: dict[str, SessionResource] = {}
+    ) -> Mapping[str, _agents.SessionResource]:
+        stored: dict[str, _agents.SessionResource] = {}
         for session in snapshot.sessions:
             if session.resource_id in stored:
                 raise ValueError(
-                    f"duplicate checkpoint session resource: {session.resource_id}"
+                    f"duplicate checkpoint session resource: "
+                    f"{session.resource_id}"
                 )
-            stored[session.resource_id] = SessionResource(
+            stored[session.resource_id] = _agents.SessionResource(
                 persistent=session.persistent,
                 provider=session.provider,
                 provider_session_id=(
                     None
                     if session.provider_session_id is None
-                    else ProviderSessionId(session.provider_session_id)
+                    else ids.ProviderSessionId(session.provider_session_id)
                 ),
                 access=(
-                    None if session.access is None else AgentAccess(session.access)
+                    None
+                    if session.access is None
+                    else declarations.AgentAccess(session.access)
                 ),
                 copy_on_write=session.copy_on_write,
                 require_copy_on_write=(
-                    self._checkpointing is CheckpointPolicy.REQUIRED
+                    self._checkpointing is run_store.CheckpointPolicy.REQUIRED
                 ),
                 branch_supported=session.branch_supported,
                 tainted=session.tainted,
             )
-        return MappingProxyType(stored)
+        return types.MappingProxyType(stored)
 
     @staticmethod
     def _restore_resources(
-        frame: GraphFrameSnapshot,
-        resources: Resources,
-        stored: Mapping[str, SessionResource],
+        frame: _continuation.GraphFrameSnapshot,
+        resources: _agents.Resources,
+        stored: Mapping[str, _agents.SessionResource],
         /,
-    ) -> Resources:
+    ) -> _agents.Resources:
         bindings = dict(frame.session_bindings)
         expected = {str(session_id) for session_id in resources.sessions}
         if set(bindings) != expected:
             raise ValueError(
-                "checkpoint session bindings do not match the workflow definition"
+                "checkpoint session bindings do not match the "
+                "workflow definition"
             )
-        restored_sessions: dict[AgentSessionId, SessionResource] = {}
+        restored_sessions: dict[
+            ids.AgentSessionId, _agents.SessionResource
+        ] = {}
         for raw_session_id, resource_id in bindings.items():
             resource = stored.get(resource_id)
             if resource is None:
                 raise ValueError(
                     f"checkpoint session resource is missing: {resource_id}"
                 )
-            restored_sessions[AgentSessionId(raw_session_id)] = resource
-        return Resources(
+            restored_sessions[ids.AgentSessionId(raw_session_id)] = resource
+        return _agents.Resources(
             resources.profiles,
-            MappingProxyType(restored_sessions),
+            types.MappingProxyType(restored_sessions),
             resources.invocation_journal,
             resources.invocation_epoch,
         )
 
     def _restore_graph_frame(
         self,
-        stored_frame: GraphFrameSnapshot,
-        graph: GraphDefinition[Any, Any, Any, Any],
-        scope: CallScope,
-        project_root: Path,
+        stored_frame: _continuation.GraphFrameSnapshot,
+        graph: declarations.GraphDefinition[Any, Any, Any, Any],
+        scope: _calls.CallScope,
+        project_root: pathlib.Path,
         project_path: str,
-        resource_arguments: Resources,
-        sessions: Mapping[str, SessionResource],
-        output_root: Path,
-        statistics: RunStatistics,
+        resource_arguments: _agents.Resources,
+        sessions: Mapping[str, _agents.SessionResource],
+        output_root: pathlib.Path,
+        statistics: statistics_module.RunStatistics,
         /,
     ) -> _LiveGraphFrame:
-        validate_graph(graph)
+        validation.validate_graph(graph)
         expected_scope = (
             scope.current,
             scope.root,
@@ -1574,9 +1707,11 @@ class Dispatcher:
             stored_frame.scope_root_workflow_id,
         )
         if stored_scope != expected_scope:
-            raise ValueError("checkpoint call scope does not match the workflow")
-        state = restore_workflow_state(graph, stored_frame.state)
-        resources = invocation_resources(
+            raise ValueError(
+                "checkpoint call scope does not match the workflow"
+            )
+        state = _continuation.restore_workflow_state(graph, stored_frame.state)
+        resources = _agents.invocation_resources(
             graph,
             stored_frame.entry_input,
             stored_frame.params,
@@ -1584,15 +1719,17 @@ class Dispatcher:
         )
         resources = self._restore_resources(stored_frame, resources, sessions)
         report_relative = (
-            Path(stored_frame.call_path).parent
+            pathlib.Path(stored_frame.call_path).parent
             if stored_frame.report_path is None
-            else Path(stored_frame.report_path)
+            else pathlib.Path(stored_frame.report_path)
         )
-        graph_statistics = statistics.scoped(_contained(output_root, report_relative))
+        graph_statistics = statistics.scoped(
+            _contained(output_root, report_relative)
+        )
         graph_statistics.restore(stored_frame.statistics)
         graph_output = _GraphOutput.restore(
             output_root,
-            Path(stored_frame.call_path),
+            pathlib.Path(stored_frame.call_path),
             graph,
             project_path,
             graph_statistics,
@@ -1601,11 +1738,15 @@ class Dispatcher:
         )
         report_dir = _contained(output_root, report_relative)
         if not (report_dir / "config.md").exists():
-            write_configuration(
+            _configuration.write_configuration(
                 report_dir,
                 (
-                    ConfigurationValue("input", stored_frame.entry_input),
-                    ConfigurationValue("params", stored_frame.params),
+                    _configuration.ConfigurationValue(
+                        "input", stored_frame.entry_input
+                    ),
+                    _configuration.ConfigurationValue(
+                        "params", stored_frame.params
+                    ),
                 ),
             )
         return _LiveGraphFrame(
@@ -1627,19 +1768,21 @@ class Dispatcher:
     def _call_site(
         self,
         parent: _LiveGraphFrame,
-        stored_call: CallFrameSnapshot | _LiveCallFrame,
+        stored_call: _continuation.CallFrameSnapshot | _LiveCallFrame,
         /,
     ) -> tuple[
-        NodeDefinition[Any, Any],
+        declarations.NodeDefinition[Any, Any],
         Edge,
-        CallVisitDefinition[Any, Any, Any, Any, Any, Any, Any],
-        SubroutineCall | WorkflowCall,
+        declarations.CallVisitDefinition[Any, Any, Any, Any, Any, Any, Any],
+        declarations.SubroutineCall | declarations.WorkflowCall,
     ]:
         node = self._nodes(parent.graph).get(stored_call.node_id)
-        if node is None or isinstance(node, FeatureNodeDefinition):
+        if node is None or isinstance(node, declarations.FeatureNodeDefinition):
             raise ValueError("checkpoint call node does not exist")
         operation = node.operation
-        if not isinstance(operation, (SubroutineCall, WorkflowCall)):
+        if not isinstance(
+            operation, (declarations.SubroutineCall, declarations.WorkflowCall)
+        ):
             raise ValueError("nested checkpoint does not describe a call node")
         edge = next(
             (
@@ -1652,11 +1795,13 @@ class Dispatcher:
         if edge is None or edge.target != node.id:
             raise ValueError("checkpoint call edge does not match the graph")
         visit = edge.visit
-        if not isinstance(visit, CallVisitDefinition):
+        if not isinstance(visit, declarations.CallVisitDefinition):
             raise ValueError("checkpoint call edge is not a durable call visit")
-        expected_operation = DefinitionReference(
+        expected_operation = _continuation.DefinitionReference(
             kind=(
-                "subroutine" if isinstance(operation, SubroutineCall) else "workflow"
+                "subroutine"
+                if isinstance(operation, declarations.SubroutineCall)
+                else "workflow"
             ),
             id=operation.definition_id,
             module=operation.definition_module,
@@ -1664,11 +1809,17 @@ class Dispatcher:
         )
         if stored_call.operation != expected_operation:
             raise ValueError("checkpoint call target does not match the graph")
-        expected_control: WaitingForChild | ChildReturned
+        expected_control: (
+            _continuation.WaitingForChild | _continuation.ChildReturned
+        )
         if stored_call.phase in {"child_pending", "child_active"}:
-            expected_control = WaitingForChild(call_frame_id=stored_call.frame_id)
+            expected_control = _continuation.WaitingForChild(
+                call_frame_id=stored_call.frame_id
+            )
         else:
-            expected_control = ChildReturned(call_frame_id=stored_call.frame_id)
+            expected_control = _continuation.ChildReturned(
+                call_frame_id=stored_call.frame_id
+            )
         if parent.control != expected_control:
             raise ValueError("checkpoint graph and call controls do not match")
         latest = parent.graph_output.latest(node.id)
@@ -1677,11 +1828,15 @@ class Dispatcher:
             or latest.relative_to(parent.graph_output.root).as_posix()
             != stored_call.visit_path
         ):
-            raise ValueError("checkpoint call output does not match the node visit")
+            raise ValueError(
+                "checkpoint call output does not match the node visit"
+            )
         return node, edge, visit, operation
 
     @staticmethod
-    def _live_call_frame(stored: CallFrameSnapshot, /) -> _LiveCallFrame:
+    def _live_call_frame(
+        stored: _continuation.CallFrameSnapshot, /
+    ) -> _LiveCallFrame:
         return _LiveCallFrame(
             frame_id=stored.frame_id,
             parent_graph_frame_id=stored.parent_graph_frame_id,
@@ -1708,14 +1863,15 @@ class Dispatcher:
     def _restore_stack_call(
         self,
         parent: _LiveGraphFrame,
-        stored: GraphFrameSnapshot | CallFrameSnapshot,
+        stored: _continuation.GraphFrameSnapshot
+        | _continuation.CallFrameSnapshot,
         /,
     ) -> tuple[
         _LiveCallFrame,
-        NodeDefinition[Any, Any],
-        SubroutineCall | WorkflowCall,
+        declarations.NodeDefinition[Any, Any],
+        declarations.SubroutineCall | declarations.WorkflowCall,
     ]:
-        if not isinstance(stored, CallFrameSnapshot):
+        if not isinstance(stored, _continuation.CallFrameSnapshot):
             raise ValueError("checkpoint continuation stack is not alternating")
         if stored.parent_graph_frame_id != parent.frame_id:
             raise ValueError("checkpoint call parent does not match its graph")
@@ -1724,12 +1880,15 @@ class Dispatcher:
 
     @staticmethod
     def _restore_stack_child_snapshot(
-        snapshot: ContinuationSnapshot,
+        snapshot: _continuation.ContinuationSnapshot,
         position: int,
         call: _LiveCallFrame,
-        operation: SubroutineCall | WorkflowCall,
+        operation: declarations.SubroutineCall | declarations.WorkflowCall,
         /,
-    ) -> tuple[GraphFrameSnapshot, SubroutineCall] | None:
+    ) -> (
+        tuple[_continuation.GraphFrameSnapshot, declarations.SubroutineCall]
+        | None
+    ):
         if call.phase == "child_pending":
             if (
                 call.child_activation_id is not None
@@ -1752,18 +1911,20 @@ class Dispatcher:
             return None
         if call.child_output is not None or call.child_error is not None:
             raise ValueError("an active checkpoint call has child results")
-        if isinstance(operation, WorkflowCall):
+        if isinstance(operation, declarations.WorkflowCall):
             if (
                 call.child_activation_id is not None
                 or call.child_call_path is None
                 or call.child_graph_frame_id is not None
             ):
                 raise ValueError(
-                    "an active workflow checkpoint has invalid child activation state"
+                    "an active workflow checkpoint has invalid "
+                    "child activation state"
                 )
             if position != len(snapshot.frames):
                 raise ValueError(
-                    "an isolated workflow checkpoint cannot embed child graph frames"
+                    "an isolated workflow checkpoint cannot embed "
+                    "child graph frames"
                 )
             return None
         if (
@@ -1776,23 +1937,25 @@ class Dispatcher:
         if position >= len(snapshot.frames):
             raise ValueError("an active checkpoint call has no child graph")
         stored_child = snapshot.frames[position]
-        if not isinstance(stored_child, GraphFrameSnapshot):
+        if not isinstance(stored_child, _continuation.GraphFrameSnapshot):
             raise ValueError("an active checkpoint call has no child graph")
         if call.child_graph_frame_id != stored_child.frame_id:
-            raise ValueError("checkpoint call does not identify its child graph")
+            raise ValueError(
+                "checkpoint call does not identify its child graph"
+            )
         return stored_child, operation
 
     def _restore_nested_child(
         self,
         parent: _LiveGraphFrame,
-        node: NodeDefinition[Any, Any],
-        operation: SubroutineCall,
+        node: declarations.NodeDefinition[Any, Any],
+        operation: declarations.SubroutineCall,
         call: _LiveCallFrame,
-        stored_child: GraphFrameSnapshot,
-        sessions: Mapping[str, SessionResource],
+        stored_child: _continuation.GraphFrameSnapshot,
+        sessions: Mapping[str, _agents.SessionResource],
         params_registry: _ParameterRegistry,
-        output_root: Path,
-        statistics: RunStatistics,
+        output_root: pathlib.Path,
+        statistics: statistics_module.RunStatistics,
         /,
     ) -> _LiveGraphFrame:
         target = self._resolve_local_call(
@@ -1802,20 +1965,28 @@ class Dispatcher:
             stored_child.definition.kind != "subroutine"
             or stored_child.definition.id != target.definition.graph.id
             or stored_child.definition.module != operation.definition_module
-            or normalize_project_path(stored_child.definition.project_path)
+            or _process.normalize_project_path(
+                stored_child.definition.project_path
+            )
             != target.project_path
         ):
-            raise ValueError("checkpoint child definition does not match the call")
+            raise ValueError(
+                "checkpoint child definition does not match the call"
+            )
         child_parent = (
-            Path(stored_child.call_path).parent
+            pathlib.Path(stored_child.call_path).parent
             if stored_child.report_path is None
-            else Path(stored_child.report_path)
+            else pathlib.Path(stored_child.report_path)
         )
         if call.child_activation_id is None:
-            raise ValueError("active local checkpoint call has no activation id")
+            raise ValueError(
+                "active local checkpoint call has no activation id"
+            )
         if child_parent != self._child_activation_parent(call):
-            raise ValueError("checkpoint child output is outside its activation")
-        arguments = child_resource_arguments(
+            raise ValueError(
+                "checkpoint child output is outside its activation"
+            )
+        arguments = _agents.child_resource_arguments(
             operation,
             target.definition.graph,
             parent.resources,
@@ -1835,28 +2006,32 @@ class Dispatcher:
 
     def _restore_nested_stack(
         self,
-        definition: WorkflowDefinition[Any, Any, Any, Any],
-        snapshot: ContinuationSnapshot,
-        output_root: Path,
-        statistics: RunStatistics,
+        definition: declarations.WorkflowDefinition[Any, Any, Any, Any],
+        snapshot: _continuation.ContinuationSnapshot,
+        output_root: pathlib.Path,
+        statistics: statistics_module.RunStatistics,
         /,
         *,
         root_project_path: str = ".",
     ) -> _ParameterRegistry:
         if not snapshot.frames or not isinstance(
-            snapshot.frames[0], GraphFrameSnapshot
+            snapshot.frames[0], _continuation.GraphFrameSnapshot
         ):
             raise ValueError("checkpoint continuation has no root graph frame")
-        root, root_scope = workflow_subroutine(self._project_root, definition)
+        root, root_scope = _calls.workflow_subroutine(
+            self._project_root, definition
+        )
         stored_root = snapshot.frames[0]
-        expected_root = DefinitionReference(
+        expected_root = _continuation.DefinitionReference(
             kind="subroutine",
             id=root.graph.id,
             module=definition.entry.definition_module,
             project_path=root_project_path,
         )
         if stored_root.definition != expected_root:
-            raise ValueError("checkpoint definition does not match the workflow")
+            raise ValueError(
+                "checkpoint definition does not match the workflow"
+            )
 
         registry = _ParameterRegistry.restore(
             definition.params_types,
@@ -1864,9 +2039,9 @@ class Dispatcher:
             base=root_project_path,
         )
         self._activation_root = (
-            Path(stored_root.call_path).parent
+            pathlib.Path(stored_root.call_path).parent
             if stored_root.report_path is None
-            else Path(stored_root.report_path)
+            else pathlib.Path(stored_root.report_path)
         )
         sessions = self._restore_session_resources(snapshot)
         root_frame = self._restore_graph_frame(
@@ -1885,7 +2060,9 @@ class Dispatcher:
         parent = root_frame
         while position < len(snapshot.frames):
             stored_call = snapshot.frames[position]
-            call, node, operation = self._restore_stack_call(parent, stored_call)
+            call, node, operation = self._restore_stack_call(
+                parent, stored_call
+            )
             live_frames.append(call)
             position += 1
             child_source = self._restore_stack_child_snapshot(
@@ -1912,7 +2089,10 @@ class Dispatcher:
             parent = child
             position += 1
 
-        if isinstance(parent.control, (WaitingForChild, ChildReturned)) and (
+        if isinstance(
+            parent.control,
+            (_continuation.WaitingForChild, _continuation.ChildReturned),
+        ) and (
             not live_frames or not isinstance(live_frames[-1], _LiveCallFrame)
         ):
             raise ValueError("checkpoint graph is missing its live call frame")
@@ -1922,18 +2102,19 @@ class Dispatcher:
 
     def _resume_continuation(
         self,
-        definition: WorkflowDefinition[Any, Any, Any, Any],
-        snapshot: ContinuationSnapshot,
-        output_root: Path,
+        definition: declarations.WorkflowDefinition[Any, Any, Any, Any],
+        snapshot: _continuation.ContinuationSnapshot,
+        output_root: pathlib.Path,
         /,
         *,
         checkpoint_shards: Mapping[str, bytes] = _NO_CHECKPOINT_SHARDS,
         retry_incomplete: bool = False,
-        budget: Budget | None = None,
+        budget: _calls.Budget | None = None,
         root_project_path: str = ".",
-    ) -> tuple[Success[object, WorkflowState[Any]], int]:
-        """Resume one decoded stack; child.py uses this inside its own environment."""
-
+    ) -> tuple[
+        declarations.Success[object, declarations.WorkflowState[Any]], int
+    ]:
+        """Resume a decoded stack in the child environment."""
         self._cancellation.raise_if_cancelled()
         if self._statistics is None:
             raise RuntimeError("continuation resume has no statistics owner")
@@ -1947,7 +2128,9 @@ class Dispatcher:
             root_project_path=root_project_path,
         )
         active_budget = (
-            Budget(snapshot.transitions_remaining) if budget is None else budget
+            _calls.Budget(snapshot.transitions_remaining)
+            if budget is None
+            else budget
         )
         if budget is not None:
             active_budget.remaining = snapshot.transitions_remaining
@@ -1956,12 +2139,16 @@ class Dispatcher:
                 if not isinstance(frame, _LiveCallFrame):
                     continue
                 if position == 0:
-                    raise ValueError("checkpoint continuation starts with a call frame")
+                    raise ValueError(
+                        "checkpoint continuation starts with a call frame"
+                    )
                 parent = self._continuation_frames[position - 1]
                 if not isinstance(parent, _LiveGraphFrame):
-                    raise ValueError("checkpoint call has no parent graph frame")
+                    raise ValueError(
+                        "checkpoint call has no parent graph frame"
+                    )
                 _, _, _, operation = self._call_site(parent, frame)
-                if isinstance(operation, WorkflowCall):
+                if isinstance(operation, declarations.WorkflowCall):
                     shard_name = self._remote_shard_name(frame)
                     if frame.phase == "child_active":
                         self._remote_resume_payload(frame)
@@ -1972,12 +2159,16 @@ class Dispatcher:
                             and self._run_store is not None
                             and self._resume_checkpoint_sequence is not None
                         ):
-                            has_shard = shard_name in self._run_store.checkpoint_shards(
-                                self._resume_checkpoint_sequence
+                            has_shard = (
+                                shard_name
+                                in self._run_store.checkpoint_shards(
+                                    self._resume_checkpoint_sequence
+                                )
                             )
                         if has_shard:
                             raise ValueError(
-                                "pending workflow call has a child continuation shard"
+                                "pending workflow call has a "
+                                "child continuation shard"
                             )
                 frame.timing = parent.graph_output.statistics.start(
                     path=frame.visit_path,
@@ -2009,16 +2200,18 @@ class Dispatcher:
 
     def _configure_restored_execution(
         self,
-        definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
-        output_root: Path,
-        store: RunStore,
+        definition: declarations.WorkflowDefinition[
+            InputT, OutputT, ParamsT, ScopeT
+        ],
+        output_root: pathlib.Path,
+        store: run_store.RunStore,
         checkpoint: int,
-        checkpointing: CheckpointPolicy,
+        checkpointing: run_store.CheckpointPolicy,
         /,
         *,
         retry_incomplete: bool = False,
     ) -> None:
-        root, _ = workflow_subroutine(self._project_root, definition)
+        root, _ = _calls.workflow_subroutine(self._project_root, definition)
         self._configure(definition, root.graph)
         self._checkpointing = checkpointing
         self._run_store = store
@@ -2030,33 +2223,37 @@ class Dispatcher:
 
     def resume(
         self,
-        definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
+        definition: declarations.WorkflowDefinition[
+            InputT, OutputT, ParamsT, ScopeT
+        ],
         /,
         *,
-        output_dir: Path,
+        output_dir: pathlib.Path,
         retry_incomplete: bool = False,
-        _source_store: RunStore | None = None,
-    ) -> Success[OutputT, WorkflowState[ScopeT]]:
+        _source_store: run_store.RunStore | None = None,
+    ) -> declarations.Success[OutputT, declarations.WorkflowState[ScopeT]]:
         """Resume the same run at its latest exactly committed boundary."""
-
         output_root = output_dir.resolve()
         store = _reuse_source_store(output_root, _source_store)
         with store.lease():
             manifest = store.manifest()
             if manifest.workflow.id != str(definition.id):
                 raise ValueError(
-                    "run workflow does not match the supplied workflow definition"
+                    "run workflow does not match the supplied "
+                    "workflow definition"
                 )
-            drift = compatibility_drift(
+            drift = _checkpoint_compatibility.compatibility_drift(
                 manifest.compatibility,
-                checkpoint_compatibility(self._project_root),
+                _checkpoint_compatibility.checkpoint_compatibility(
+                    self._project_root
+                ),
             )
             if drift is not None:
                 raise ValueError(
                     "run compatibility fingerprints do not match the current "
                     f"workflow environment: {drift}"
                 )
-            if manifest.status is RunStatus.SUCCEEDED:
+            if manifest.status is run_store.RunStatus.SUCCEEDED:
                 raise ValueError("a succeeded run cannot be resumed")
             latest = manifest.checkpoints.latest_completed
             if (
@@ -2065,17 +2262,20 @@ class Dispatcher:
                 or not manifest.checkpoints.resume_available
             ):
                 raise ValueError(
-                    "the latest completed workflow boundary is not exactly resumable"
+                    "the latest completed workflow boundary is "
+                    "not exactly resumable"
                 )
             summary = _checkpoint_summary(store, latest)
             if not summary.restore_available:
                 raise ValueError("the latest checkpoint is not restorable")
             store.validate_artifacts(latest)
-            snapshot = decode_continuation(
+            snapshot = _continuation.decode_continuation(
                 store.checkpoint_shard(latest, "runtime.pkl")
             )
             if str(snapshot.run_id) != manifest.id:
-                raise ValueError("checkpoint run id does not match its run manifest")
+                raise ValueError(
+                    "checkpoint run id does not match its run manifest"
+                )
             self._configure_restored_execution(
                 definition,
                 output_root,
@@ -2095,54 +2295,64 @@ class Dispatcher:
                         retry_incomplete=retry_incomplete,
                     )
                 )
-        return cast(Success[OutputT, WorkflowState[ScopeT]], result)
+        return cast(
+            declarations.Success[OutputT, declarations.WorkflowState[ScopeT]],
+            result,
+        )
 
     def restart(
         self,
-        definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
+        definition: declarations.WorkflowDefinition[
+            InputT, OutputT, ParamsT, ScopeT
+        ],
         input: InputT,
         /,
         *,
-        source_output_dir: Path,
-        output_dir: Path,
-        sessions: SessionPolicy,
+        source_output_dir: pathlib.Path,
+        output_dir: pathlib.Path,
+        sessions: policies.SessionPolicy,
         source_checkpoint: int | None = None,
-        params: Mapping[ParameterAddress, object] = _NO_PARAMETERS,
+        params: Mapping[declarations.ParameterAddress, object] = _NO_PARAMETERS,
         runtime_options: object = None,
         workflow_arguments: Sequence[str] = (),
         arguments_mode: Literal["reused", "overridden"] = "reused",
-        _source_store: RunStore | None = None,
-    ) -> Success[OutputT, WorkflowState[ScopeT]]:
+        _source_store: run_store.RunStore | None = None,
+    ) -> declarations.Success[OutputT, declarations.WorkflowState[ScopeT]]:
         """Start a new lineage child from the source run's initial state."""
-
-        policy = SessionPolicy(sessions)
+        policy = policies.SessionPolicy(sessions)
         if arguments_mode not in {"reused", "overridden"}:
-            raise ValueError("restart arguments mode must be reused or overridden")
+            raise ValueError(
+                "restart arguments mode must be reused or overridden"
+            )
         source = _reuse_source_store(source_output_dir, _source_store)
         with source.lease():
             manifest = source.manifest()
             if manifest.workflow.id != str(definition.id):
                 raise ValueError(
-                    "source run workflow does not match the supplied workflow definition"
+                    "source run workflow does not match the "
+                    "supplied workflow definition"
                 )
             checkpoint = source_checkpoint
-            seed: Mapping[str, SessionResource] | None = None
-            if policy is SessionPolicy.BRANCH:
+            seed: Mapping[str, _agents.SessionResource] | None = None
+            if policy is policies.SessionPolicy.BRANCH:
                 if checkpoint is None:
                     checkpoint = _latest_branchable_checkpoint(source)
                 if checkpoint is None:
                     raise ValueError(
-                        "source run has no checkpoint from which conversations can branch"
+                        "source run has no checkpoint from which "
+                        "conversations can branch"
                     )
                 summary = _checkpoint_summary(source, checkpoint)
                 if not summary.fork_with_branch_available:
                     raise ValueError(
-                        "persistent conversations cannot branch from the selected checkpoint"
+                        "persistent conversations cannot branch "
+                        "from the selected checkpoint"
                     )
                 seed = _restart_session_seed(
                     source.checkpoint_shard(checkpoint, _RESTART_SESSION_SHARD),
                     require_copy_on_write=(
-                        manifest.launch.checkpointing is CheckpointPolicy.REQUIRED
+                        manifest.launch.checkpointing
+                        is run_store.CheckpointPolicy.REQUIRED
                     ),
                 )
             else:
@@ -2156,7 +2366,7 @@ class Dispatcher:
             checkpointing=manifest.launch.checkpointing,
             workflow_arguments=workflow_arguments,
             _record_run=True,
-            _parent=ParentRun(
+            _parent=run_store.ParentRun(
                 run_id=manifest.id,
                 operation="restart",
                 checkpoint=checkpoint,
@@ -2167,38 +2377,47 @@ class Dispatcher:
 
     def fork(
         self,
-        definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
+        definition: declarations.WorkflowDefinition[
+            InputT, OutputT, ParamsT, ScopeT
+        ],
         /,
         *,
-        source_output_dir: Path,
+        source_output_dir: pathlib.Path,
         checkpoint: int,
-        output_dir: Path,
-        sessions: SessionPolicy,
-        _source_store: RunStore | None = None,
-    ) -> Success[OutputT, WorkflowState[ScopeT]]:
+        output_dir: pathlib.Path,
+        sessions: policies.SessionPolicy,
+        _source_store: run_store.RunStore | None = None,
+    ) -> declarations.Success[OutputT, declarations.WorkflowState[ScopeT]]:
         """Continue a selected source checkpoint as a new lineage child."""
-
-        policy = SessionPolicy(sessions)
+        policy = policies.SessionPolicy(sessions)
         source_output = source_output_dir.resolve()
         target_output = output_dir.resolve()
         source = _reuse_source_store(source_output, _source_store)
-        actual_compatibility = checkpoint_compatibility(self._project_root)
+        actual_compatibility = (
+            _checkpoint_compatibility.checkpoint_compatibility(
+                self._project_root
+            )
+        )
         with source.lease():
             manifest = source.manifest()
             if manifest.workflow.id != str(definition.id):
                 raise ValueError(
-                    "source run workflow does not match the supplied workflow definition"
+                    "source run workflow does not match the "
+                    "supplied workflow definition"
                 )
-            drift = compatibility_drift(manifest.compatibility, actual_compatibility)
+            drift = _checkpoint_compatibility.compatibility_drift(
+                manifest.compatibility, actual_compatibility
+            )
             if drift is not None:
                 raise ValueError(
-                    "source compatibility fingerprints do not match the current "
+                    "source compatibility fingerprints do not match "
+                    "the current "
                     f"workflow environment: {drift}"
                 )
             source_summary = _checkpoint_summary(source, checkpoint)
             available = (
                 source_summary.fork_with_branch_available
-                if policy is SessionPolicy.BRANCH
+                if policy is policies.SessionPolicy.BRANCH
                 else source_summary.fork_with_fresh_available
             )
             if not source_summary.restore_available or not available:
@@ -2207,14 +2426,18 @@ class Dispatcher:
                     f"{policy.value} conversations"
                 )
             if not source.artifact_references_available(checkpoint):
-                raise ValueError("selected checkpoint has no artifact references")
+                raise ValueError(
+                    "selected checkpoint has no artifact references"
+                )
 
             raw_shards = dict(source.checkpoint_shards(checkpoint))
             runtime = raw_shards.pop("runtime.pkl", None)
             raw_shards.pop(_RESTART_SESSION_SHARD, None)
             if runtime is None:
-                raise ValueError("selected checkpoint has no runtime continuation")
-            run_id = RunId(str(uuid4()))
+                raise ValueError(
+                    "selected checkpoint has no runtime continuation"
+                )
+            run_id = ids.RunId(str(uuid.uuid4()))
             transformed_runtime, snapshot = _fork_runtime_payload(
                 runtime,
                 run_id=run_id,
@@ -2222,10 +2445,12 @@ class Dispatcher:
                 target_output=target_output,
                 sessions=policy,
             )
-            transformed_shards: dict[str, bytes] = {"runtime.pkl": transformed_runtime}
+            transformed_shards: dict[str, bytes] = {
+                "runtime.pkl": transformed_runtime
+            }
             for name, value in raw_shards.items():
                 transformed_shards[name] = (
-                    mark_child_checkpoint_fork(
+                    _child_checkpoint.mark_child_checkpoint_fork(
                         value,
                         run_id=str(run_id),
                         source_output=source_output,
@@ -2235,13 +2460,13 @@ class Dispatcher:
                     if name.startswith("children/")
                     else value
                 )
-            transformed_shards[_RESTART_SESSION_SHARD] = _restart_session_payload(
-                snapshot
+            transformed_shards[_RESTART_SESSION_SHARD] = (
+                _restart_session_payload(snapshot)
             )
             source.materialize_artifacts(checkpoint, target_output)
             (target_output / "trace.log").touch(exist_ok=False)
 
-        store = RunStore.create(
+        store = run_store.RunStore.create(
             target_output,
             project_root=self._project_root,
             workflow_id=str(definition.id),
@@ -2250,7 +2475,7 @@ class Dispatcher:
             workflow_arguments=manifest.launch.workflow_arguments,
             checkpointing=manifest.launch.checkpointing,
             run_id=str(run_id),
-            parent=ParentRun(
+            parent=run_store.ParentRun(
                 run_id=manifest.id,
                 operation="fork",
                 checkpoint=checkpoint,
@@ -2258,9 +2483,9 @@ class Dispatcher:
             ),
             compatibility=actual_compatibility,
         )
-        base = CheckpointSummary(
+        base = run_store.CheckpointSummary(
             sequence=1,
-            created_at=utc_now(),
+            created_at=run_store.utc_now(),
             kind=source_summary.kind,
             completed=source_summary.completed,
             next=source_summary.next,
@@ -2282,33 +2507,42 @@ class Dispatcher:
             1,
             manifest.launch.checkpointing,
         )
-        with self._lifecycle_execution(target_output, store) as execute:
-            with store.lease():
-                result, _ = execute(
-                    lambda: self._resume_continuation(
-                        definition,
-                        snapshot,
-                        target_output,
-                        checkpoint_shards={
-                            name: value
-                            for name, value in transformed_shards.items()
-                            if name != "runtime.pkl"
-                        },
-                    )
+        with (
+            self._lifecycle_execution(target_output, store) as execute,
+            store.lease(),
+        ):
+            result, _ = execute(
+                lambda: self._resume_continuation(
+                    definition,
+                    snapshot,
+                    target_output,
+                    checkpoint_shards={
+                        name: value
+                        for name, value in transformed_shards.items()
+                        if name != "runtime.pkl"
+                    },
                 )
-        return cast(Success[OutputT, WorkflowState[ScopeT]], result)
+            )
+        return cast(
+            declarations.Success[OutputT, declarations.WorkflowState[ScopeT]],
+            result,
+        )
 
     def _configure(
         self,
-        definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
-        graph: GraphDefinition[Any, Any, Any, Any],
+        definition: declarations.WorkflowDefinition[
+            InputT, OutputT, ParamsT, ScopeT
+        ],
+        graph: declarations.GraphDefinition[Any, Any, Any, Any],
         /,
     ) -> None:
         self._artifact_cache.clear()
         self._previous_artifacts = None
         configuration = definition.configuration
         entry = definition.entry
-        target_profiles = {parameter.id for parameter in graph.profile_parameters}
+        target_profiles = {
+            parameter.id for parameter in graph.profile_parameters
+        }
         caller_profile_ids = {
             caller_id
             for parameter_id, caller_id in entry.profile_arguments.items()
@@ -2321,40 +2555,50 @@ class Dispatcher:
                 + ", ".join(sorted(map(str, missing)))
             )
         profiles = {
-            profile_id: invoker(
+            profile_id: _agents.invoker(
                 configuration.profile_arguments[profile_id],
                 f"workflow profile argument {profile_id}",
             )
             for profile_id in caller_profile_ids
         }
-        sessions: dict[AgentSessionId, SessionResource] = {}
+        sessions: dict[ids.AgentSessionId, _agents.SessionResource] = {}
         for session in definition.sessions:
             if session.id in sessions:
-                raise ValueError(f"duplicate workflow agent session id: {session.id}")
+                raise ValueError(
+                    f"duplicate workflow agent session id: {session.id}"
+                )
             if not session.id:
                 raise ValueError("workflow agent session id must not be empty")
             if not session.name:
                 raise ValueError(
-                    f"workflow agent session {session.id} name must not be empty"
+                    f"workflow agent session {session.id} name "
+                    f"must not be empty"
                 )
-            require_instance(
+            validation.require_instance(
                 session.persistent,
                 bool,
-                f"workflow agent session {session.id} persistent must be boolean",
+                (
+                    f"workflow agent session {session.id} persistent "
+                    f"must be boolean"
+                ),
             )
-            sessions[session.id] = SessionResource(persistent=session.persistent)
-        caller = Resources(
-            MappingProxyType(profiles),
-            MappingProxyType(sessions),
+            sessions[session.id] = _agents.SessionResource(
+                persistent=session.persistent
+            )
+        caller = _agents.Resources(
+            types.MappingProxyType(profiles),
+            types.MappingProxyType(sessions),
         )
-        self._root_resource_arguments = child_resource_arguments(entry, graph, caller)
+        self._root_resource_arguments = _agents.child_resource_arguments(
+            entry, graph, caller
+        )
 
     def _call_snapshot(
         self,
         call: _LiveCallFrame,
         /,
-    ) -> CallFrameSnapshot:
-        return CallFrameSnapshot(
+    ) -> _continuation.CallFrameSnapshot:
+        return _continuation.CallFrameSnapshot(
             frame_id=call.frame_id,
             parent_graph_frame_id=call.parent_graph_frame_id,
             node_id=call.node_id,
@@ -2375,24 +2619,69 @@ class Dispatcher:
             child_error=self._checkpoint_exception(call.child_error),
         )
 
+    def _activation_resources(
+        self,
+        graph: declarations.GraphDefinition[Any, Any, Any, Any],
+        value: object,
+        params: object,
+        resource_arguments: _agents.Resources,
+    ) -> _agents.Resources:
+        """Restore root sessions and prepare fresh sessions for checkpoints."""
+        resources = _agents.invocation_resources(
+            graph, value, params, resource_arguments
+        )
+        is_root = not self._continuation_frames
+        if is_root and self._root_session_seed is not None:
+            expected = {str(session_id) for session_id in resources.sessions}
+            if set(self._root_session_seed) != expected:
+                raise ValueError(
+                    "restart session bindings do not match "
+                    "the workflow definition"
+                )
+            seeded: dict[ids.AgentSessionId, _agents.SessionResource] = {}
+            for session_id, declared in resources.sessions.items():
+                restored = self._root_session_seed[str(session_id)]
+                if restored.persistent != declared.persistent:
+                    raise ValueError(
+                        "restart session persistence does not match the "
+                        "workflow definition"
+                    )
+                seeded[session_id] = restored
+            resources = _agents.Resources(
+                resources.profiles,
+                types.MappingProxyType(seeded),
+                resources.invocation_journal,
+                resources.invocation_epoch,
+            )
+        for session in resources.sessions.values():
+            if not session.persistent or session.provider is not None:
+                continue
+            session.copy_on_write = (
+                self._checkpointing is not run_store.CheckpointPolicy.OFF
+            )
+            session.require_copy_on_write = (
+                self._checkpointing is run_store.CheckpointPolicy.REQUIRED
+            )
+        return resources
+
     def _start_graph_activation(
         self,
-        graph: GraphDefinition[Any, Any, Any, Any],
-        scope: CallScope,
+        graph: declarations.GraphDefinition[Any, Any, Any, Any],
+        scope: _calls.CallScope,
         value: object,
-        run_id: RunId,
-        budget: Budget,
-        output_root: Path,
-        activation_parent: Path,
-        project_root: Path,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
+        output_root: pathlib.Path,
+        activation_parent: pathlib.Path,
+        project_root: pathlib.Path,
         project_path: str,
         params_registry: _ParameterRegistry,
-        resource_arguments: Resources,
+        resource_arguments: _agents.Resources,
         *,
-        definition_reference: DefinitionReference,
+        definition_reference: _continuation.DefinitionReference,
         params_override: object = _USE_REGISTERED_PARAMS,
         check_output_transport: Callable[[object], bool] | None = None,
-        entry_values: tuple[ConfigurationValue, ...] = (),
+        entry_values: tuple[_configuration.ConfigurationValue, ...] = (),
         parent_call: _LiveCallFrame | None = None,
         frame_id: str | None = None,
     ) -> _LiveGraphFrame:
@@ -2400,7 +2689,9 @@ class Dispatcher:
         if self._statistics is None:
             raise RuntimeError("graph activation has no statistics owner")
         self._parameter_registry = params_registry
-        statistics = self._statistics.scoped(_contained(output_root, activation_parent))
+        statistics = self._statistics.scoped(
+            _contained(output_root, activation_parent)
+        )
         graph_output: _GraphOutput | None = None
         frame: _LiveGraphFrame | None = None
         record_failure = False
@@ -2412,7 +2703,7 @@ class Dispatcher:
                 project_path,
                 statistics,
             )
-            validate_graph(graph)
+            validation.validate_graph(graph)
             registered_params = params_registry.value(project_path, graph.id)
             params = (
                 registered_params
@@ -2420,41 +2711,14 @@ class Dispatcher:
                 else params_override
             )
             record_failure = True
-            resources = invocation_resources(graph, value, params, resource_arguments)
-            is_root = not self._continuation_frames
-            if is_root and self._root_session_seed is not None:
-                expected = {str(session_id) for session_id in resources.sessions}
-                if set(self._root_session_seed) != expected:
-                    raise ValueError(
-                        "restart session bindings do not match the workflow definition"
-                    )
-                seeded: dict[AgentSessionId, SessionResource] = {}
-                for session_id, declared in resources.sessions.items():
-                    restored = self._root_session_seed[str(session_id)]
-                    if restored.persistent != declared.persistent:
-                        raise ValueError(
-                            "restart session persistence does not match the "
-                            "workflow definition"
-                        )
-                    seeded[session_id] = restored
-                resources = Resources(
-                    resources.profiles,
-                    MappingProxyType(seeded),
-                    resources.invocation_journal,
-                    resources.invocation_epoch,
-                )
-            for session in resources.sessions.values():
-                if not session.persistent or session.provider is not None:
-                    continue
-                session.copy_on_write = self._checkpointing is not CheckpointPolicy.OFF
-                session.require_copy_on_write = (
-                    self._checkpointing is CheckpointPolicy.REQUIRED
-                )
+            resources = self._activation_resources(
+                graph, value, params, resource_arguments
+            )
             state = initial_workflow_state(graph)
             frame = _LiveGraphFrame(
                 project_root=project_root,
                 project_path=project_path,
-                frame_id=str(uuid4()) if frame_id is None else frame_id,
+                frame_id=str(uuid.uuid4()) if frame_id is None else frame_id,
                 definition=definition_reference,
                 graph=graph,
                 scope=scope,
@@ -2462,7 +2726,7 @@ class Dispatcher:
                 params=params,
                 value=value,
                 state=state,
-                control=TerminalControl(outcome="failure"),
+                control=_continuation.Terminal(outcome="failure"),
                 graph_output=graph_output,
                 resources=resources,
                 check_output_transport=check_output_transport,
@@ -2472,18 +2736,22 @@ class Dispatcher:
                 if (
                     len(self._continuation_frames) < 2
                     or self._continuation_frames[-1] is not parent_call
-                    or not isinstance(self._continuation_frames[-2], _LiveGraphFrame)
+                    or not isinstance(
+                        self._continuation_frames[-2], _LiveGraphFrame
+                    )
                 ):
-                    raise RuntimeError("child activation has no parent call frame")
+                    raise RuntimeError(
+                        "child activation has no parent call frame"
+                    )
                 parent = self._continuation_frames[-2]
                 parent_call.child_graph_frame_id = frame.frame_id
             self._continuation_frames.append(frame)
             if parent is not None and parent_call is not None:
-                register_invocation(
+                _configuration.register_invocation(
                     output_root,
                     graph_output.report_relative,
                     parent.graph_output.relative,
-                    Path(parent_call.visit_path),
+                    pathlib.Path(parent_call.visit_path),
                     str(graph.id),
                     parent_report=parent.graph_output.report_relative,
                 )
@@ -2491,7 +2759,10 @@ class Dispatcher:
                 graph.enter.id,
                 run_id,
                 graph_output,
-                (*entry_values, ConfigurationValue("params", params)),
+                (
+                    *entry_values,
+                    _configuration.ConfigurationValue("params", params),
+                ),
             )
             self._route(
                 graph,
@@ -2531,9 +2802,9 @@ class Dispatcher:
 
     def _ready_site(
         self, frame: _LiveGraphFrame, /
-    ) -> tuple[Edge, FeatureNode | NodeDefinition[Any, Any]]:
+    ) -> tuple[Edge, FeatureNode | declarations.NodeDefinition[Any, Any]]:
         control = frame.control
-        if not isinstance(control, Ready):
+        if not isinstance(control, _continuation.Ready):
             raise RuntimeError("graph activation is not ready")
         edge = next(
             (
@@ -2544,17 +2815,21 @@ class Dispatcher:
             None,
         )
         if edge is None or edge.target != control.target_node_id:
-            raise ValueError("checkpoint continuation edge does not match the graph")
+            raise ValueError(
+                "checkpoint continuation edge does not match the graph"
+            )
         target = self._nodes(frame.graph).get(edge.target)
         if target is None:
             raise ValueError("checkpoint continuation target does not exist")
         return edge, target
 
     @staticmethod
-    def _call_node_type(operation: SubroutineCall | WorkflowCall, /) -> str:
+    def _call_node_type(
+        operation: declarations.SubroutineCall | declarations.WorkflowCall, /
+    ) -> str:
         return (
             "subroutine_call"
-            if isinstance(operation, SubroutineCall)
+            if isinstance(operation, declarations.SubroutineCall)
             else "workflow_call"
         )
 
@@ -2564,8 +2839,8 @@ class Dispatcher:
         error: Exception,
         /,
         *,
-        node_id: NodeId,
-        edge_id: EdgeId,
+        node_id: ids.NodeId,
+        edge_id: ids.EdgeId,
         visit_path: str,
         restored: bool = False,
     ) -> None:
@@ -2582,22 +2857,24 @@ class Dispatcher:
 
     def _resolve_local_call(
         self,
-        operation: SubroutineCall,
+        operation: declarations.SubroutineCall,
         parent: _LiveGraphFrame,
-        node_id: NodeId,
+        node_id: ids.NodeId,
         params_registry: _ParameterRegistry,
         /,
     ) -> _ResolvedLocalCall:
-        owner_path, project_root = resolve_call_project(
+        owner_path, project_root = _calls.resolve_call_project(
             parent.project_root, operation.project_path, node_id
         )
         if owner_path == ".":
-            definition, scope = local_subroutine(
+            definition, scope = _calls.local_subroutine(
                 project_root, parent.scope, operation
             )
         else:
-            scope, definition = subroutine_scope(project_root, operation)
-        project_path = compose_project_path(parent.project_path, owner_path)
+            scope, definition = _calls.subroutine_scope(project_root, operation)
+        project_path = _process.compose_project_path(
+            parent.project_path, owner_path
+        )
         return _ResolvedLocalCall(
             definition=definition,
             scope=scope,
@@ -2609,26 +2886,30 @@ class Dispatcher:
     def _begin_call_activation(
         self,
         parent: _LiveGraphFrame,
-        node: NodeDefinition[Any, Any],
+        node: declarations.NodeDefinition[Any, Any],
         edge: Edge,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         params_registry: _ParameterRegistry,
         /,
     ) -> None:
         visit = edge.visit
         operation = node.operation
-        if not isinstance(visit, CallVisitDefinition) or not isinstance(
-            operation, (SubroutineCall, WorkflowCall)
+        if not isinstance(
+            visit, declarations.CallVisitDefinition
+        ) or not isinstance(
+            operation, (declarations.SubroutineCall, declarations.WorkflowCall)
         ):
-            raise RuntimeError("durable call activation has an invalid call site")
+            raise RuntimeError(
+                "durable call activation has an invalid call site"
+            )
         previous_state = parent.state.get(node)
         output_dir, timing = parent.graph_output.start_node(
             node.id,
             self._call_node_type(operation),
         )
         visit_path = output_dir.relative_to(parent.graph_output.root).as_posix()
-        node_context = NodeContext(
+        node_context = declarations.NodeContext(
             run_id=run_id,
             graph_id=parent.graph.id,
             node_id=node.id,
@@ -2647,14 +2928,16 @@ class Dispatcher:
             )
         except BaseException as error:
             timing.finish(
-                "cancelled" if isinstance(error, ExecutionCancelled) else "failed"
+                "cancelled"
+                if isinstance(error, cancellation_module.ExecutionCancelled)
+                else "failed"
             )
             raise
         call: _LiveCallFrame | None = None
         try:
             target: _ResolvedLocalCall | None
             child_params: object
-            if isinstance(operation, SubroutineCall):
+            if isinstance(operation, declarations.SubroutineCall):
                 target = self._resolve_local_call(
                     operation,
                     parent,
@@ -2673,17 +2956,18 @@ class Dispatcher:
                 child_params,
             )
             request = self._snapshot_call_request(execution_request)
-            if self._checkpointing is CheckpointPolicy.REQUIRED:
+            if self._checkpointing is run_store.CheckpointPolicy.REQUIRED:
                 try:
                     cloudpickle.dumps(request)
                 except Exception as error:
                     raise RuntimeError(
-                        "child call request is not serializable [checkpoint_required]"
+                        "child call request is not serializable "
+                        "[checkpoint_required]"
                     ) from error
-            reference = DefinitionReference(
+            reference = _continuation.DefinitionReference(
                 kind=(
                     "subroutine"
-                    if isinstance(operation, SubroutineCall)
+                    if isinstance(operation, declarations.SubroutineCall)
                     else "workflow"
                 ),
                 id=operation.definition_id,
@@ -2691,7 +2975,7 @@ class Dispatcher:
                 project_path=operation.project_path,
             )
             call = _LiveCallFrame(
-                frame_id=str(uuid4()),
+                frame_id=str(uuid.uuid4()),
                 parent_graph_frame_id=parent.frame_id,
                 node_id=node.id,
                 incoming_edge_id=edge.id,
@@ -2707,12 +2991,14 @@ class Dispatcher:
                 timing=timing,
                 running_emitted=True,
             )
-            parent.control = WaitingForChild(call_frame_id=call.frame_id)
+            parent.control = _continuation.WaitingForChild(
+                call_frame_id=call.frame_id
+            )
             self._continuation_frames.append(call)
             self._checkpoint(
                 run_id,
                 budget,
-                CheckpointKind.CHILD_START,
+                run_store.CheckpointKind.CHILD_START,
                 None,
                 self._boundary(
                     parent.graph_output,
@@ -2742,7 +3028,9 @@ class Dispatcher:
                     )
             finally:
                 timing.finish(
-                    "cancelled" if isinstance(error, ExecutionCancelled) else "failed"
+                    "cancelled"
+                    if isinstance(error, cancellation_module.ExecutionCancelled)
+                    else "failed"
                 )
             raise
 
@@ -2751,13 +3039,15 @@ class Dispatcher:
         parent: _LiveGraphFrame,
         call: _LiveCallFrame,
         /,
-    ) -> NodeContext[object]:
-        return NodeContext(
+    ) -> declarations.NodeContext[object]:
+        return declarations.NodeContext(
             run_id=call.adapter_run_id,
             graph_id=parent.graph.id,
             node_id=call.node_id,
             edge_id=call.incoming_edge_id,
-            output_dir=_contained(parent.graph_output.root, Path(call.visit_path)),
+            output_dir=_contained(
+                parent.graph_output.root, pathlib.Path(call.visit_path)
+            ),
             params=parent.params,
         )
 
@@ -2766,11 +3056,14 @@ class Dispatcher:
         call: _LiveCallFrame,
         child_output: object,
         child_error: Exception | None,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         /,
     ) -> None:
-        if not self._continuation_frames or self._continuation_frames[-1] is not call:
+        if (
+            not self._continuation_frames
+            or self._continuation_frames[-1] is not call
+        ):
             raise RuntimeError("child return has no active call frame")
         if len(self._continuation_frames) < 2 or not isinstance(
             self._continuation_frames[-2], _LiveGraphFrame
@@ -2780,11 +3073,13 @@ class Dispatcher:
         call.child_output = child_output
         call.child_error = child_error
         call.phase = "child_returned"
-        parent.control = ChildReturned(call_frame_id=call.frame_id)
+        parent.control = _continuation.ChildReturned(
+            call_frame_id=call.frame_id
+        )
         self._checkpoint(
             run_id,
             budget,
-            CheckpointKind.CHILD_RETURN,
+            run_store.CheckpointKind.CHILD_RETURN,
             None,
             self._boundary(
                 parent.graph_output,
@@ -2793,7 +3088,7 @@ class Dispatcher:
             ),
         )
 
-    def _child_activation_parent(self, call: _LiveCallFrame, /) -> Path:
+    def _child_activation_parent(self, call: _LiveCallFrame, /) -> pathlib.Path:
         raw = call.child_call_path
         if raw is None:
             # Older local checkpoints identify their flat directory only by ID.
@@ -2804,10 +3099,10 @@ class Dispatcher:
                     / _encoded_id(call.child_activation_id)
                 )
             raise RuntimeError("child call has no child path")
-        path = Path(raw)
+        path = pathlib.Path(raw)
         if path.is_absolute() or ".." in path.parts or path.as_posix() != raw:
             raise ValueError("child call has an invalid child path")
-        visit = Path(call.visit_path)
+        visit = pathlib.Path(call.visit_path)
         if path == visit:
             return path
         if path.parent == visit and _attempt_number(path.name) is not None:
@@ -2829,11 +3124,11 @@ class Dispatcher:
         /,
     ) -> None:
         activation_parent = self._child_activation_parent(call)
-        register_invocation(
+        _configuration.register_invocation(
             parent.graph_output.root,
             activation_parent,
             parent.graph_output.relative,
-            Path(call.visit_path),
+            pathlib.Path(call.visit_path),
             None,
             parent_report=parent.graph_output.report_relative,
         )
@@ -2842,14 +3137,14 @@ class Dispatcher:
         self,
         parent: _LiveGraphFrame,
         call: _LiveCallFrame,
-        operation: SubroutineCall,
+        operation: declarations.SubroutineCall,
         target: _ResolvedLocalCall,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         params_registry: _ParameterRegistry,
         /,
     ) -> None:
-        arguments = child_resource_arguments(
+        arguments = _agents.child_resource_arguments(
             operation,
             target.definition.graph,
             parent.resources,
@@ -2871,7 +3166,7 @@ class Dispatcher:
                 target.project_path,
                 params_registry,
                 arguments,
-                definition_reference=DefinitionReference(
+                definition_reference=_continuation.DefinitionReference(
                     kind="subroutine",
                     id=target.definition.graph.id,
                     module=operation.definition_module,
@@ -2888,16 +3183,18 @@ class Dispatcher:
         self,
         parent: _LiveGraphFrame,
         call: _LiveCallFrame,
-        node: NodeDefinition[Any, Any],
+        node: declarations.NodeDefinition[Any, Any],
         edge: Edge,
-        visit: CallVisitDefinition[Any, Any, Any, Any, Any, Any, Any],
-        operation: SubroutineCall | WorkflowCall,
-        run_id: RunId,
-        budget: Budget,
+        visit: declarations.CallVisitDefinition[
+            Any, Any, Any, Any, Any, Any, Any
+        ],
+        operation: declarations.SubroutineCall | declarations.WorkflowCall,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         params_registry: _ParameterRegistry,
         /,
     ) -> None:
-        if isinstance(operation, SubroutineCall):
+        if isinstance(operation, declarations.SubroutineCall):
             target = call.target or self._resolve_local_call(
                 operation,
                 parent,
@@ -2908,7 +3205,7 @@ class Dispatcher:
             child_params: object = target.params
         else:
             child_params = _OMITTED_CHILD_PARAMS
-        context = replace(
+        context = dataclasses.replace(
             self._call_node_context(parent, call), run_id=call.adapter_run_id
         )
         success = self._replay_call_visit(
@@ -2950,8 +3247,8 @@ class Dispatcher:
     def _step_call_activation(
         self,
         call: _LiveCallFrame,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         params_registry: _ParameterRegistry,
         /,
     ) -> None:
@@ -2974,11 +3271,11 @@ class Dispatcher:
         if call.phase in {"child_pending", "child_active"}:
             pending = call.phase == "child_pending"
             if pending:
-                if isinstance(operation, SubroutineCall):
-                    call.child_activation_id = str(uuid4())
+                if isinstance(operation, declarations.SubroutineCall):
+                    call.child_activation_id = str(uuid.uuid4())
                 call.child_call_path = call.visit_path
                 call.phase = "child_active"
-            if isinstance(operation, WorkflowCall):
+            if isinstance(operation, declarations.WorkflowCall):
                 output: object = None
                 child_error: Exception | None = None
                 request = call.execution_request or call.request
@@ -3008,7 +3305,9 @@ class Dispatcher:
                 )
                 return
             if not pending:
-                raise ValueError("active local call has no child graph activation")
+                raise ValueError(
+                    "active local call has no child graph activation"
+                )
             target = call.target or self._resolve_local_call(
                 operation,
                 parent,
@@ -3041,10 +3340,10 @@ class Dispatcher:
     def _finish_graph_activation(
         self,
         frame: _LiveGraphFrame,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         /,
-    ) -> Success[object, WorkflowState[Any]] | None:
+    ) -> declarations.Success[object, declarations.WorkflowState[Any]] | None:
         result = self._finish_success(
             frame.graph,
             _Terminal(frame.value, frame.state),
@@ -3081,17 +3380,20 @@ class Dispatcher:
     def _step_graph_activation(
         self,
         frame: _LiveGraphFrame,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         params_registry: _ParameterRegistry,
         /,
-    ) -> Success[object, WorkflowState[Any]] | None:
-        if isinstance(frame.control, Ready):
+    ) -> declarations.Success[object, declarations.WorkflowState[Any]] | None:
+        if isinstance(frame.control, _continuation.Ready):
             edge, node = self._ready_site(frame)
             if (
-                isinstance(node, NodeDefinition)
-                and isinstance(node.operation, (SubroutineCall, WorkflowCall))
-                and isinstance(edge.visit, CallVisitDefinition)
+                isinstance(node, declarations.NodeDefinition)
+                and isinstance(
+                    node.operation,
+                    (declarations.SubroutineCall, declarations.WorkflowCall),
+                )
+                and isinstance(edge.visit, declarations.CallVisitDefinition)
             ):
                 self._begin_call_activation(
                     frame,
@@ -3119,7 +3421,7 @@ class Dispatcher:
             )
             return None
         if (
-            isinstance(frame.control, TerminalControl)
+            isinstance(frame.control, _continuation.Terminal)
             and frame.control.outcome == "success"
         ):
             return self._finish_graph_activation(frame, run_id, budget)
@@ -3129,7 +3431,7 @@ class Dispatcher:
         self,
         call: _LiveCallFrame,
         error: Exception,
-        run_id: RunId,
+        run_id: ids.RunId,
         /,
     ) -> None:
         if len(self._continuation_frames) < 2 or not isinstance(
@@ -3165,8 +3467,8 @@ class Dispatcher:
     def _recover_activation_error(
         self,
         error: Exception,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         /,
     ) -> bool:
         active_error = error
@@ -3211,7 +3513,9 @@ class Dispatcher:
             return True
         return False
 
-    def _abort_activations(self, status: TimingStatus, /) -> None:
+    def _abort_activations(
+        self, status: statistics_module.TimingStatus, /
+    ) -> None:
         while self._continuation_frames:
             frame = self._continuation_frames.pop()
             try:
@@ -3225,11 +3529,11 @@ class Dispatcher:
 
     def _drive_activations(
         self,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         params_registry: _ParameterRegistry,
         /,
-    ) -> Success[object, WorkflowState[Any]]:
+    ) -> declarations.Success[object, declarations.WorkflowState[Any]]:
         while self._continuation_frames:
             try:
                 self._cancellation.raise_if_cancelled()
@@ -3265,33 +3569,37 @@ class Dispatcher:
                             raise
                         continue
                     if not recovered:
-                        raise pending
+                        if pending is error:
+                            raise
+                        raise pending from error
                     break
             except BaseException as error:
                 self._abort_activations(
-                    "cancelled" if isinstance(error, ExecutionCancelled) else "failed"
+                    "cancelled"
+                    if isinstance(error, cancellation_module.ExecutionCancelled)
+                    else "failed"
                 )
                 raise
         raise RuntimeError("workflow activation stack ended without a result")
 
     def _run_graph(
         self,
-        graph: GraphDefinition[Any, Any, Any, ScopeT],
-        scope: CallScope,
+        graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
+        scope: _calls.CallScope,
         value: object,
-        run_id: RunId,
-        budget: Budget,
-        output_root: Path,
-        call_path: Path,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
+        output_root: pathlib.Path,
+        call_path: pathlib.Path,
         project_path: str,
         params_registry: _ParameterRegistry,
-        resource_arguments: Resources,
+        resource_arguments: _agents.Resources,
         *,
-        definition_reference: DefinitionReference,
+        definition_reference: _continuation.DefinitionReference,
         params_override: object = _USE_REGISTERED_PARAMS,
         check_output_transport: Callable[[object], bool] | None = None,
-        entry_values: tuple[ConfigurationValue, ...] = (),
-    ) -> Success[object, WorkflowState[ScopeT]]:
+        entry_values: tuple[_configuration.ConfigurationValue, ...] = (),
+    ) -> declarations.Success[object, declarations.WorkflowState[ScopeT]]:
         if self._continuation_frames:
             raise RuntimeError(
                 "root graph execution requires an empty activation stack"
@@ -3315,18 +3623,18 @@ class Dispatcher:
             entry_values=entry_values,
         )
         return cast(
-            Success[object, WorkflowState[ScopeT]],
+            declarations.Success[object, declarations.WorkflowState[ScopeT]],
             self._drive_activations(run_id, budget, params_registry),
         )
 
     def _finish_success(
         self,
-        graph: GraphDefinition[Any, Any, Any, ScopeT],
+        graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
         terminal: _Terminal[ScopeT],
-        run_id: RunId,
+        run_id: ids.RunId,
         graph_output: _GraphOutput,
         check_transport: Callable[[object], bool] | None,
-    ) -> Success[object, WorkflowState[ScopeT]]:
+    ) -> declarations.Success[object, declarations.WorkflowState[ScopeT]]:
         with graph_output.node(graph.exit.id, "exit"):
             self._emit_node(
                 graph.id,
@@ -3351,13 +3659,15 @@ class Dispatcher:
                 None,
                 graph_output.project_path,
             )
-            return Success(output=terminal.output, state=terminal.state)
+            return declarations.Success(
+                output=terminal.output, state=terminal.state
+            )
 
     def _record_failure(
         self,
-        graph: GraphDefinition[Any, Any, Any, Any],
+        graph: declarations.GraphDefinition[Any, Any, Any, Any],
         error: Exception,
-        run_id: RunId,
+        run_id: ids.RunId,
         graph_output: _GraphOutput,
         project_path: str,
     ) -> None:
@@ -3390,10 +3700,10 @@ class Dispatcher:
 
     def _enter(
         self,
-        node_id: NodeId,
-        run_id: RunId,
+        node_id: ids.NodeId,
+        run_id: ids.RunId,
         graph_output: _GraphOutput,
-        configuration: tuple[ConfigurationValue, ...],
+        configuration: tuple[_configuration.ConfigurationValue, ...],
     ) -> None:
         with graph_output.node(node_id, "enter"):
             self._emit_node(
@@ -3404,7 +3714,7 @@ class Dispatcher:
                 None,
                 graph_output.project_path,
             )
-            write_configuration(
+            _configuration.write_configuration(
                 _contained(graph_output.root, graph_output.report_relative),
                 configuration,
             )
@@ -3419,27 +3729,35 @@ class Dispatcher:
 
     def _walk(
         self,
-        graph: GraphDefinition[Any, Any, Any, ScopeT],
-        scope: CallScope,
-        entity: FeatureNode | NodeDefinition[Any, ScopeT],
+        graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
+        scope: _calls.CallScope,
+        entity: FeatureNode | declarations.NodeDefinition[Any, ScopeT],
         incoming_edge: Edge,
         value: object,
-        state: WorkflowState[ScopeT],
-        run_id: RunId,
-        budget: Budget,
+        state: declarations.WorkflowState[ScopeT],
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         graph_output: _GraphOutput,
-        resources: Resources,
+        resources: _agents.Resources,
         project_path: str,
         params: object,
         params_registry: _ParameterRegistry,
     ) -> None:
-        if isinstance(entity, FeatureNodeDefinition):
+        if isinstance(entity, declarations.FeatureNodeDefinition):
             output, candidate = self._execute_feature_node(
-                graph, entity, incoming_edge, value, state, run_id, graph_output, params
+                graph,
+                entity,
+                incoming_edge,
+                value,
+                state,
+                run_id,
+                graph_output,
+                params,
             )
         elif isinstance(
-            entity.operation, (SubroutineCall, WorkflowCall)
-        ) and isinstance(incoming_edge.visit, CallVisitDefinition):
+            entity.operation,
+            (declarations.SubroutineCall, declarations.WorkflowCall),
+        ) and isinstance(incoming_edge.visit, declarations.CallVisitDefinition):
             raise RuntimeError("durable call reached the ordinary graph walker")
         else:
             output, candidate = self._execute_ordinary_entity(
@@ -3467,30 +3785,38 @@ class Dispatcher:
             project_path,
         )
 
-    @contextmanager
+    @contextlib.contextmanager
     def _visit(
         self,
-        node_id: NodeId,
+        node_id: ids.NodeId,
         node_type: str,
         incoming_edge: Edge,
         previous_state: object,
-        run_id: RunId,
+        run_id: ids.RunId,
         graph_output: _GraphOutput,
         params: object,
-    ) -> Generator[tuple[VisitImplementation, NodeContext[object]]]:
+    ) -> Generator[
+        tuple[
+            graph_declarations.VisitImplementation,
+            declarations.NodeContext[object],
+        ]
+    ]:
         with graph_output.node(node_id, node_type) as output_dir:
             try:
                 visit = incoming_edge.visit
                 if (
-                    not isinstance(visit, VisitDefinition)
+                    not isinstance(visit, declarations.VisitDefinition)
                     or visit.implementation is None
                 ):
-                    fault(
+                    _errors.fault(
                         node_id,
                         "missing_visit",
-                        "an executable node must be entered through an implemented visit",
+                        (
+                            "an executable node must be entered "
+                            "through an implemented visit"
+                        ),
                     )
-                context = NodeContext(
+                context = declarations.NodeContext(
                     run_id=run_id,
                     graph_id=graph_output.graph_id,
                     node_id=node_id,
@@ -3510,7 +3836,8 @@ class Dispatcher:
             except Exception as error:
                 error.add_note(
                     "Verdog node: "
-                    f"project={graph_output.project_path} graph={graph_output.graph_id} "
+                    f"project={graph_output.project_path} "
+                    f"graph={graph_output.graph_id} "
                     f"node={node_id} edge={incoming_edge.id} "
                     f"output={output_dir.relative_to(graph_output.root).as_posix()}"
                 )
@@ -3526,26 +3853,32 @@ class Dispatcher:
 
     def _execute_feature_node(
         self,
-        graph: GraphDefinition[Any, Any, Any, ScopeT],
+        graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
         node: FeatureNode,
         incoming_edge: Edge,
         value: object,
-        state: WorkflowState[ScopeT],
-        run_id: RunId,
+        state: declarations.WorkflowState[ScopeT],
+        run_id: ids.RunId,
         graph_output: _GraphOutput,
         params: object,
-    ) -> tuple[object, WorkflowState[ScopeT]]:
+    ) -> tuple[object, declarations.WorkflowState[ScopeT]]:
         with self._visit(
-            node.id, "feature", incoming_edge, None, run_id, graph_output, params
+            node.id,
+            "feature",
+            incoming_edge,
+            None,
+            run_id,
+            graph_output,
+            params,
         ) as (implementation, context):
             result = feature.execute(implementation, value, state, context)
-            if not isinstance(result, FeatureSuccess):
-                fault(
+            if not isinstance(result, declarations.FeatureSuccess):
+                _errors.fault(
                     node.id,
                     "invalid_result",
                     "feature node did not return FeatureSuccess",
                 )
-            success = cast(FeatureSuccess[ScopeT], result)
+            success = cast(declarations.FeatureSuccess[ScopeT], result)
             candidate = self._validate_feature_successor(
                 graph, node, success.state, state
             )
@@ -3561,27 +3894,27 @@ class Dispatcher:
 
     def _run_durable_workflow(
         self,
-        operation: WorkflowCall,
+        operation: declarations.WorkflowCall,
         call: _LiveCallFrame,
         request: _CallRequest,
         parent: _LiveGraphFrame,
-        run_id: RunId,
-        budget: Budget,
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         /,
         *,
         resume_continuation: bytes | None = None,
     ) -> object:
-        owner_path, _ = resolve_call_project(
+        owner_path, _ = _calls.resolve_call_project(
             parent.project_root, operation.project_path, call.node_id
         )
         if owner_path == ".":
-            require_local_workflow(parent.scope, operation)
+            _calls.require_local_workflow(parent.scope, operation)
         graph_output = parent.graph_output
 
-        def handle_event(event: EventFrame) -> None:
+        def handle_event(event: _protocol.EventFrame) -> None:
             self._forward_child_event(event, budget)
 
-        def handle_checkpoint(frame: RemoteCheckpointFrame) -> None:
+        def handle_checkpoint(frame: _protocol.CheckpointFrame) -> None:
             self._accept_remote_checkpoint(call, frame, run_id, budget)
 
         arguments: dict[str, object] = {
@@ -3607,11 +3940,13 @@ class Dispatcher:
         }
         if request.params_override:
             arguments["params_override"] = request.params
-        output, budget.remaining = invoke_child_process(**arguments)  # type: ignore[arg-type]
+        output, budget.remaining = child_module.invoke(**arguments)  # type: ignore[arg-type]
         return output
 
     @staticmethod
-    def _call_request(child_input: object, child_params: object, /) -> _CallRequest:
+    def _call_request(
+        child_input: object, child_params: object, /
+    ) -> _CallRequest:
         if child_params is _OMITTED_CHILD_PARAMS:
             return _CallRequest(
                 input=child_input,
@@ -3630,7 +3965,7 @@ class Dispatcher:
             copied = cloudpickle.loads(cloudpickle.dumps(request))
         except Exception:
             try:
-                copied = deepcopy(request)
+                copied = copy.deepcopy(request)
             except Exception:
                 return request
         if not isinstance(copied, _CallRequest):  # pragma: no cover - invariant
@@ -3675,12 +4010,14 @@ class Dispatcher:
 
     @staticmethod
     def _call_context(
-        node_context: NodeContext[object],
+        node_context: declarations.NodeContext[object],
         child_params: object,
         invoke: Callable[[object, object], object],
         /,
-    ) -> CallContext[object, object, object, object]:
-        return CallContext(
+    ) -> declarations.CallContext[object, object, object, object]:
+        # Pylint misses the dataclass fields inherited from NodeContext.
+        # pylint: disable-next=unexpected-keyword-arg
+        return declarations.CallContext(
             run_id=node_context.run_id,
             graph_id=node_context.graph_id,
             node_id=node_context.node_id,
@@ -3693,10 +4030,12 @@ class Dispatcher:
 
     def _invoke_call_visit(
         self,
-        visit: CallVisitDefinition[Any, Any, Any, Any, Any, Any, Any],
+        visit: declarations.CallVisitDefinition[
+            Any, Any, Any, Any, Any, Any, Any
+        ],
         value: object,
         previous_state: object,
-        node_context: NodeContext[object],
+        node_context: declarations.NodeContext[object],
         child_params: object,
         invoke: Callable[[object, object], object],
         /,
@@ -3709,7 +4048,7 @@ class Dispatcher:
         )
         if isinstance(result, Awaitable):
             self._close_awaitable(cast(Awaitable[Any], result))
-            fault(
+            _errors.fault(
                 node_context.node_id,
                 "async_call_visit",
                 "call visit implementation must be synchronous",
@@ -3718,10 +4057,12 @@ class Dispatcher:
 
     def _capture_call_request(
         self,
-        visit: CallVisitDefinition[Any, Any, Any, Any, Any, Any, Any],
+        visit: declarations.CallVisitDefinition[
+            Any, Any, Any, Any, Any, Any, Any
+        ],
         value: object,
         previous_state: object,
-        node_context: NodeContext[object],
+        node_context: declarations.NodeContext[object],
         child_params: object,
         /,
     ) -> _CallRequest:
@@ -3731,12 +4072,14 @@ class Dispatcher:
             nonlocal invocations
             invocations += 1
             if invocations != 1:
-                fault(
+                _errors.fault(
                     node_context.node_id,
                     "call_invocation_count",
                     "a call node must invoke its child exactly once",
                 )
-            raise _ChildCallRequested(self._call_request(child_input, selected_params))
+            raise _ChildCallRequested(
+                self._call_request(child_input, selected_params)
+            )
 
         try:
             self._invoke_call_visit(
@@ -3750,12 +4093,12 @@ class Dispatcher:
         except _ChildCallRequested as requested:
             return requested.request
         if invocations:
-            fault(
+            _errors.fault(
                 node_context.node_id,
                 "call_control_intercepted",
                 "call visit intercepted its durable child invocation",
             )
-        fault(
+        _errors.fault(
             node_context.node_id,
             "call_invocation_count",
             "a call node must invoke its child exactly once",
@@ -3763,16 +4106,18 @@ class Dispatcher:
 
     def _replay_call_visit(
         self,
-        visit: CallVisitDefinition[Any, Any, Any, Any, Any, Any, Any],
+        visit: declarations.CallVisitDefinition[
+            Any, Any, Any, Any, Any, Any, Any
+        ],
         value: object,
         previous_state: object,
-        node_context: NodeContext[object],
+        node_context: declarations.NodeContext[object],
         child_params: object,
         request: _CallRequest,
         child_output: object,
         child_error: Exception | None,
         /,
-    ) -> Success[object, object]:
+    ) -> declarations.Success[object, object]:
         replay = _CallReplayController(
             node_id=node_context.node_id,
             request=request,
@@ -3793,36 +4138,39 @@ class Dispatcher:
         finally:
             replay.enforce()
         if replay.invocations != 1:
-            fault(
+            _errors.fault(
                 node_context.node_id,
                 "call_invocation_count",
                 "a call node must invoke its child exactly once",
             )
-        if not isinstance(result, Success):
-            fault(
+        if not isinstance(result, declarations.Success):
+            _errors.fault(
                 node_context.node_id,
                 "invalid_result",
                 "call visit did not return Success",
             )
-        return cast(Success[object, object], result)
+        return cast(declarations.Success[object, object], result)
 
     def _execute_ordinary_entity(
         self,
-        entity: NodeDefinition[Any, ScopeT],
+        entity: declarations.NodeDefinition[Any, ScopeT],
         incoming_edge: Edge,
         value: object,
-        state: WorkflowState[ScopeT],
-        run_id: RunId,
-        scope: CallScope,
-        budget: Budget,
+        state: declarations.WorkflowState[ScopeT],
+        run_id: ids.RunId,
+        scope: _calls.CallScope,
+        budget: _calls.Budget,
         graph_output: _GraphOutput,
-        resources: Resources,
+        resources: _agents.Resources,
         params: object,
         params_registry: _ParameterRegistry,
-    ) -> tuple[object, WorkflowState[ScopeT]]:
+    ) -> tuple[object, declarations.WorkflowState[ScopeT]]:
         previous_state: object = state.get(entity)
-        if isinstance(entity.operation, (SubroutineCall, WorkflowCall)):
-            fault(
+        if isinstance(
+            entity.operation,
+            (declarations.SubroutineCall, declarations.WorkflowCall),
+        ):
+            _errors.fault(
                 entity.id,
                 "durable_call_visit_required",
                 "call nodes require a synchronous CallVisitDefinition",
@@ -3845,13 +4193,13 @@ class Dispatcher:
             params,
         ) as (implementation, context):
             result = handler.execute(implementation, context)
-            if not isinstance(result, Success):
-                fault(
+            if not isinstance(result, declarations.Success):
+                _errors.fault(
                     entity.id,
                     "invalid_result",
                     "entity did not return Success",
                 )
-            success = cast(Success[object, object], result)
+            success = cast(declarations.Success[object, object], result)
             candidate = self._ordinary_successor(entity, success.state, state)
             self._emit_node(
                 context.graph_id,
@@ -3865,15 +4213,15 @@ class Dispatcher:
 
     def _node_handler(
         self,
-        operation: Operation,
-        node_id: NodeId,
+        operation: operations.Operation,
+        node_id: ids.NodeId,
         value: object,
         previous_state: object,
-        budget: Budget,
-        resources: Resources,
+        budget: _calls.Budget,
+        resources: _agents.Resources,
     ) -> _NodeHandler:
-        if isinstance(operation, Agent):
-            invocation_resources = Resources(
+        if isinstance(operation, declarations.Agent):
+            invocation_resources = _agents.Resources(
                 resources.profiles,
                 resources.sessions,
                 resources.invocation_journal,
@@ -3891,7 +4239,7 @@ class Dispatcher:
                     self._cancellation,
                 ),
             )
-        if isinstance(operation, Python):
+        if isinstance(operation, declarations.Python):
             return _NodeHandler(
                 "python",
                 lambda implementation, context: python.execute(
@@ -3900,20 +4248,24 @@ class Dispatcher:
             )
 
         def unsupported(
-            implementation: VisitImplementation, context: NodeContext[object]
+            implementation: graph_declarations.VisitImplementation,
+            context: declarations.NodeContext[object],
         ) -> object:
-            fault(
+            _errors.fault(
                 node_id,
                 "unsupported_operation",
-                f"{type(operation).__name__} is not an operation this runtime executes",
+                (
+                    f"{type(operation).__name__} is not an operation "
+                    f"this runtime executes"
+                ),
             )
 
         return _NodeHandler("unknown", unsupported)
 
     def _forward_child_event(
         self,
-        event: EventFrame,
-        budget: Budget,
+        event: _protocol.EventFrame,
+        budget: _calls.Budget,
     ) -> None:
         budget.remaining = event.transitions_remaining
         if event.kind == "node":
@@ -3921,7 +4273,7 @@ class Dispatcher:
                 NodeExecution(
                     run_id=event.run_id,
                     graph_id=event.graph_id,
-                    node_id=NodeId(event.entity_id),
+                    node_id=ids.NodeId(event.entity_id),
                     status=ExecutionStatus(event.status),
                     state=None,
                     remote=True,
@@ -3933,7 +4285,7 @@ class Dispatcher:
                 EdgeExecution(
                     run_id=event.run_id,
                     graph_id=event.graph_id,
-                    edge_id=EdgeId(event.entity_id),
+                    edge_id=ids.EdgeId(event.entity_id),
                     status=ExecutionStatus(event.status),
                     state=None,
                     remote=True,
@@ -3943,18 +4295,18 @@ class Dispatcher:
 
     def _route(
         self,
-        graph: GraphDefinition[Any, Any, Any, ScopeT],
-        source: NodeId,
+        graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
+        source: ids.NodeId,
         value: object,
-        candidate_state: WorkflowState[ScopeT],
-        rollback_state: WorkflowState[ScopeT],
-        run_id: RunId,
-        budget: Budget,
+        candidate_state: declarations.WorkflowState[ScopeT],
+        rollback_state: declarations.WorkflowState[ScopeT],
+        run_id: ids.RunId,
+        budget: _calls.Budget,
         graph_output: _GraphOutput,
         project_path: str,
     ) -> None:
         outgoing = self._outgoing(graph, source)
-        compatible: list[tuple[Edge, WorkflowState[ScopeT]]] = []
+        compatible: list[tuple[Edge, declarations.WorkflowState[ScopeT]]] = []
         for edge in outgoing:
             edge_state = self._edge_candidate(
                 graph, edge, rollback_state, candidate_state
@@ -3962,17 +4314,22 @@ class Dispatcher:
             if edge_state is not None:
                 compatible.append((edge, edge_state))
         if len(compatible) != 1:
-            fault(
+            _errors.fault(
                 source,
                 "routing_failed",
-                f"entity {source} has {len(compatible)} compatible outgoing edges; expected 1",
+                (
+                    f"entity {source} has {len(compatible)} "
+                    f"compatible outgoing edges; expected 1"
+                ),
             )
         edge, next_state = compatible[0]
         budget.consume(edge.id)
         self._emit_edge(graph.id, edge.id, run_id, next_state, project_path)
         frame = self._continuation_frames[-1]
         if not isinstance(frame, _LiveGraphFrame) or frame.graph is not graph:
-            raise RuntimeError("workflow continuation stack does not match the graph")
+            raise RuntimeError(
+                "workflow continuation stack does not match the graph"
+            )
         frame.value = value
         frame.state = next_state
         completed = self._boundary(
@@ -3981,23 +4338,30 @@ class Dispatcher:
             graph_output.visits.get(source, 0),
         )
         if edge.target == graph.failure.id:
-            frame.control = TerminalControl(outcome="failure")
+            frame.control = _continuation.Terminal(outcome="failure")
             self._checkpoint(
                 run_id,
                 budget,
-                CheckpointKind.TERMINAL,
+                run_store.CheckpointKind.TERMINAL,
                 completed,
                 None,
                 restorable=False,
                 unavailable_code="checkpoint.failure_port",
-                unavailable_reason="the completed node routed to the failure port",
+                unavailable_reason=(
+                    "the completed node routed to the failure port"
+                ),
             )
-            error = RuntimeError(f"subroutine {graph.id} reached its failure port")
-            source_note = f"project={project_path} graph={graph.id} source={source}"
+            error = RuntimeError(
+                f"subroutine {graph.id} reached its failure port"
+            )
+            source_note = (
+                f"project={project_path} graph={graph.id} source={source}"
+            )
             source_output = graph_output.latest(source)
             if source_output is not None:
                 source_note += (
-                    " output=" + source_output.relative_to(graph_output.root).as_posix()
+                    " output="
+                    + source_output.relative_to(graph_output.root).as_posix()
                 )
             error.add_note("Verdog failure source: " + source_note)
             error.add_note(
@@ -4006,16 +4370,16 @@ class Dispatcher:
             )
             raise error
         if edge.target == graph.exit.id:
-            frame.control = TerminalControl(outcome="success")
+            frame.control = _continuation.Terminal(outcome="success")
             self._checkpoint(
                 run_id,
                 budget,
-                CheckpointKind.TERMINAL,
+                run_store.CheckpointKind.TERMINAL,
                 completed,
                 None,
             )
             return
-        frame.control = Ready(
+        frame.control = _continuation.Ready(
             incoming_edge_id=edge.id,
             target_node_id=edge.target,
         )
@@ -4027,33 +4391,39 @@ class Dispatcher:
         self._checkpoint(
             run_id,
             budget,
-            CheckpointKind.ENTRY if source == graph.enter.id else CheckpointKind.NODE,
+            run_store.CheckpointKind.ENTRY
+            if source == graph.enter.id
+            else run_store.CheckpointKind.NODE,
             completed,
             next_boundary,
         )
 
     def _edge_candidate(
         self,
-        graph: GraphDefinition[Any, Any, Any, ScopeT],
+        graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
         edge: Edge,
-        source_state: WorkflowState[ScopeT],
-        successor_state: WorkflowState[ScopeT],
-    ) -> WorkflowState[ScopeT] | None:
-        feature_by_id: dict[FeatureId, FeatureDefinition[Any, ScopeT]] = {
-            feature.id: feature for feature in graph.features
-        }
+        source_state: declarations.WorkflowState[ScopeT],
+        successor_state: declarations.WorkflowState[ScopeT],
+    ) -> declarations.WorkflowState[ScopeT] | None:
+        feature_by_id: dict[
+            ids.FeatureId, declarations.FeatureDefinition[Any, ScopeT]
+        ] = {feature.id: feature for feature in graph.features}
         try:
-            if not evaluate_conditions(edge.conditions, source_state, feature_by_id):
+            if not feature_semantics.evaluate_conditions(
+                edge.conditions, source_state, feature_by_id
+            ):
                 return None
         except ValueError as error:
             error.add_note(f"Verdog edge condition: {edge.id}")
             raise
         effects = (
             *edge.effects,
-            *analyze_effects(feature_by_id, edge.effects).inferred,
+            *feature_semantics.analyze_effects(
+                feature_by_id, edge.effects
+            ).inferred,
         )
         try:
-            if not effects_satisfied(
+            if not feature_semantics.effects_satisfied(
                 effects,
                 source_state,
                 successor_state,
@@ -4069,7 +4439,7 @@ class Dispatcher:
         self,
         check: Callable[[object], object],
         value: object,
-        entity_id: NodeId,
+        entity_id: ids.NodeId,
         code: str,
     ) -> None:
         try:
@@ -4078,7 +4448,7 @@ class Dispatcher:
             error.add_note(f"Verdog check: entity={entity_id} phase={code}")
             raise
         if accepted is not True:
-            fault(
+            _errors.fault(
                 entity_id,
                 code,
                 f"{getattr(check, '__name__', 'check')} returned false",
@@ -4086,18 +4456,18 @@ class Dispatcher:
 
     def _ordinary_successor(
         self,
-        entity: NodeDefinition[Any, ScopeT],
+        entity: declarations.NodeDefinition[Any, ScopeT],
         next_state: object,
-        source: WorkflowState[ScopeT],
-    ) -> WorkflowState[ScopeT]:
+        source: declarations.WorkflowState[ScopeT],
+    ) -> declarations.WorkflowState[ScopeT]:
         if type(next_state) is not entity.state_type:
-            fault(
+            _errors.fault(
                 entity.id,
                 "invalid_state",
                 "entity state has the wrong type",
             )
         try:
-            require_immutable_state(next_state)
+            validation.require_immutable_state(next_state)
         except TypeError as error:
             error.add_note(f"Verdog state returned by node {entity.id}")
             raise
@@ -4107,18 +4477,18 @@ class Dispatcher:
 
     def _validate_feature_successor(
         self,
-        graph: GraphDefinition[Any, Any, Any, ScopeT],
+        graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
         node: FeatureNode,
         successor: object,
-        source: WorkflowState[ScopeT],
-    ) -> WorkflowState[ScopeT]:
-        if not isinstance(successor, FeatureState):
-            fault(
+        source: declarations.WorkflowState[ScopeT],
+    ) -> declarations.WorkflowState[ScopeT]:
+        if not isinstance(successor, declarations.FeatureState):
+            _errors.fault(
                 node.id,
                 "invalid_feature_state",
                 "FeatureSuccess.state must be FeatureState",
             )
-        feature_state = cast(FeatureState[ScopeT], successor)
+        feature_state = cast(declarations.FeatureState[ScopeT], successor)
         candidate = feature_state._as_workflow_state()  # pyright: ignore[reportPrivateUsage]
         try:
             changed = source._changes(  # pyright: ignore[reportPrivateUsage]
@@ -4127,29 +4497,31 @@ class Dispatcher:
         except ValueError as error:
             error.add_note(f"Verdog feature state returned by node {node.id}")
             raise
-        feature_by_identity: dict[int, FeatureDefinition[Any, ScopeT]] = {
-            id(feature): feature for feature in graph.features
-        }
+        feature_by_identity: dict[
+            int, declarations.FeatureDefinition[Any, ScopeT]
+        ] = {id(feature): feature for feature in graph.features}
         for key in changed:
             feature = feature_by_identity.get(id(key))
             if feature is None or feature is not key:
-                fault(
+                _errors.fault(
                     node.id,
                     "unauthorized_state_change",
                     f"feature node {node.id} changed state {key.state_key}",
                 )
             value = candidate.get(feature)
             if value is None:
-                fault(
+                _errors.fault(
                     node.id,
                     "invalid_feature_value",
-                    f"feature node {node.id} deinitialized feature {feature.id}",
+                    f"feature node {node.id} deinitialized "
+                    f"feature {feature.id}",
                 )
             try:
-                validate_feature_value(feature, value)
+                feature_semantics.validate_feature_value(feature, value)
             except ValueError as error:
                 error.add_note(
-                    f"Verdog feature value returned by node {node.id}: {feature.id}"
+                    f"Verdog feature value returned by node "
+                    f"{node.id}: {feature.id}"
                 )
                 raise
         return candidate
@@ -4160,9 +4532,9 @@ class Dispatcher:
 
     def _emit_node(
         self,
-        graph_id: GraphId,
-        node_id: NodeId,
-        run_id: RunId,
+        graph_id: ids.GraphId,
+        node_id: ids.NodeId,
+        run_id: ids.RunId,
         status: ExecutionStatus,
         state: object,
         project_path: str,
@@ -4181,10 +4553,10 @@ class Dispatcher:
 
     def _emit_edge(
         self,
-        graph_id: GraphId,
-        edge_id: EdgeId,
-        run_id: RunId,
-        state: WorkflowState[Any],
+        graph_id: ids.GraphId,
+        edge_id: ids.EdgeId,
+        run_id: ids.RunId,
+        state: declarations.WorkflowState[Any],
         project_path: str,
         /,
     ) -> None:
@@ -4201,7 +4573,7 @@ class Dispatcher:
 
     @staticmethod
     def _write_stacktrace(
-        output_dir: Path,
+        output_dir: pathlib.Path,
         error: Exception,
     ) -> None:
         (output_dir / "stacktrace.txt").write_text(
@@ -4210,12 +4582,15 @@ class Dispatcher:
 
     @staticmethod
     def _nodes(
-        graph: GraphDefinition[Any, Any, Any, ScopeT],
-    ) -> dict[NodeId, FeatureNode | NodeDefinition[Any, ScopeT]]:
+        graph: declarations.GraphDefinition[Any, Any, Any, ScopeT],
+    ) -> dict[
+        ids.NodeId, FeatureNode | declarations.NodeDefinition[Any, ScopeT]
+    ]:
         return {node.id: node for node in graph.nodes}
 
     @staticmethod
     def _outgoing(
-        graph: GraphDefinition[Any, Any, Any, Any], source: NodeId
+        graph: declarations.GraphDefinition[Any, Any, Any, Any],
+        source: ids.NodeId,
     ) -> tuple[Edge, ...]:
         return tuple(edge for edge in graph.edges if edge.source == source)

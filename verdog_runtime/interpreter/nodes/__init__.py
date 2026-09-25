@@ -1,3 +1,5 @@
+"""Shared callback types for the per-operation node handlers."""
+
 from collections.abc import Callable
 from typing import TypeAlias, TypeVar
 

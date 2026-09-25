@@ -1,9 +1,11 @@
+"""Execute ordinary Python visits with their typed context."""
+
 from __future__ import annotations
 
 from typing import TypeVar
 
-from ...declarations import NodeContext
-from . import Visit
+from verdog_runtime import declarations
+from verdog_runtime.interpreter import nodes
 
 InputT = TypeVar("InputT")
 StateT = TypeVar("StateT")
@@ -12,10 +14,13 @@ ResultT = TypeVar("ResultT")
 
 
 def execute(
-    implementation: Visit[InputT, StateT, NodeContext[ParamsT], ResultT],
+    implementation: nodes.Visit[
+        InputT, StateT, declarations.NodeContext[ParamsT], ResultT
+    ],
     value: InputT,
     state: StateT,
-    context: NodeContext[ParamsT],
+    context: declarations.NodeContext[ParamsT],
     /,
 ) -> ResultT:
+    """Invoke a Python visit with input, immutable state, and node context."""
     return implementation(value, state, context)

@@ -1,25 +1,28 @@
 """Successful results crossing execution boundaries."""
 
-from dataclasses import dataclass
+import dataclasses
 from typing import Any, Generic, TypeVar, override
 
-from .state import FeatureState
-
+from verdog_runtime.declarations import state as state_declarations
 
 ResultOutputT = TypeVar("ResultOutputT", covariant=True)
 ResultStateT = TypeVar("ResultStateT", covariant=True)
 ScopeT = TypeVar("ScopeT")
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Success(Generic[ResultOutputT, ResultStateT]):
+    """A successful visit result carrying output and the updated state."""
+
     output: ResultOutputT
     state: ResultStateT
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class FeatureSuccess(Generic[ScopeT]):
-    state: FeatureState[ScopeT]
+    """A successful feature visit carrying only the updated feature state."""
+
+    state: state_declarations.FeatureState[ScopeT]
 
 
 class RemoteWorkflowError(RuntimeError):
@@ -32,6 +35,7 @@ class RemoteWorkflowError(RuntimeError):
         remote_traceback: str,
         /,
     ) -> None:
+        """Retain child exception identity, message, and traceback."""
         super().__init__(f"{exception_type}: {message}")
         self.exception_type = exception_type
         self.message = message

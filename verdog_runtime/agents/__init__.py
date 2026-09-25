@@ -1,22 +1,24 @@
-from ..declarations.agents import (
+"""Provider adapters for workflow agent invocations."""
+
+from verdog_runtime.declarations.agents import (
     AgentInvocationError as AgentInvocationError,
 )
-from ..declarations.agents import (
+from verdog_runtime.declarations.agents import (
     AgentInvoker as AgentInvoker,
 )
-from ..declarations.agents import (
+from verdog_runtime.declarations.agents import (
     AgentReply as AgentReply,
 )
-from ..declarations.agents import (
+from verdog_runtime.declarations.agents import (
     AgentRequest as AgentRequest,
 )
-from ..declarations.agents import (
+from verdog_runtime.declarations.agents import (
     AgentSessionAction as AgentSessionAction,
 )
-from ..declarations.agents import (
+from verdog_runtime.declarations.agents import (
     AgentSessionCapabilities as AgentSessionCapabilities,
 )
-from ..declarations.agents import (
+from verdog_runtime.declarations.agents import (
     ForkingAgentInvoker as ForkingAgentInvoker,
 )
 

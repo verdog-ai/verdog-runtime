@@ -1,31 +1,24 @@
+"""Run provider subprocesses with cancellation and validated arguments."""
+
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
+import time
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass
-from time import monotonic
 from typing import cast
 
-from .._process import (
-    cleanup_after_interruption,
-    process_options,
-    wait_until_reaped,
-)
-from ..declarations.agents import (
-    AgentInvocationError,
-    AgentReply,
-    AgentRequest,
-    AgentSessionAction,
-)
-from ..declarations.ids import ProviderSessionId
-from ._artifacts import begin, complete, failure_detail, metadata
+from verdog_runtime import _process
+from verdog_runtime.agents import _artifacts
+from verdog_runtime.declarations import agents as agent_declarations
+from verdog_runtime.declarations import ids
 
 _PROVIDER_WAIT_SECONDS = 0.05
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class CommandResult:
     returncode: int
     events: str
@@ -50,7 +43,8 @@ def validate_extra_args(
             option.startswith(candidate) for candidate in short
         ):
             raise ValueError(
-                f"{provider} extra_args may not override runtime option {option}"
+                f"{provider} extra_args may not override runtime "
+                f"option {option}"
             )
 
 
@@ -67,28 +61,31 @@ def json_objects(events: str, /) -> tuple[dict[str, object], ...]:
 
 
 def validate_session_request(
-    request: AgentRequest,
+    request: agent_declarations.AgentRequest,
     provider: str,
     /,
 ) -> None:
     action = request.provider_session_action
-    if action is not AgentSessionAction.FORK:
+    if action is not agent_declarations.AgentSessionAction.FORK:
         return
     if not request.persistent:
-        raise AgentInvocationError(
+        raise agent_declarations.AgentInvocationError(
             f"{provider} cannot fork a nonpersistent agent session"
         )
     if request.provider_session_id is None:
-        raise AgentInvocationError(f"{provider} cannot fork without a provider session")
+        raise agent_declarations.AgentInvocationError(
+            f"{provider} cannot fork without a provider session"
+        )
 
 
-def run_command(command: Sequence[str], request: AgentRequest, /) -> CommandResult:
-    """Run one provider while its complete transport streams go straight to disk."""
-
+def run_command(
+    command: Sequence[str], request: agent_declarations.AgentRequest, /
+) -> CommandResult:
+    """Run one provider while complete transport streams go straight to disk."""
     events_path = request.artifact_dir / "events.jsonl"
     stderr_path = request.artifact_dir / "stderr.txt"
     environment = os.environ.copy()
-    group_options, owns_group = process_options(environment)
+    group_options, owns_group = _process.process_options(environment)
     request.cancellation.raise_if_cancelled()
     with (
         (request.artifact_dir / "prompt.txt").open("rb") as prompt,
@@ -105,15 +102,17 @@ def run_command(command: Sequence[str], request: AgentRequest, /) -> CommandResu
             **group_options,
         )
         try:
-            while not wait_until_reaped(
+            while not _process.wait_until_reaped(
                 process,
                 timeout=request.cancellation.remaining(_PROVIDER_WAIT_SECONDS),
             ):
                 request.cancellation.raise_if_cancelled()
         except BaseException:
-            cleanup_after_interruption(process, owns_group=owns_group)
+            _process.cleanup_after_interruption(process, owns_group=owns_group)
             raise
-    if process.returncode is None:  # pragma: no cover - the wait reaps the process
+    if (
+        process.returncode is None
+    ):  # pragma: no cover - the wait reaps the process
         raise RuntimeError("agent process was not reaped")
     return CommandResult(
         returncode=process.returncode,
@@ -123,75 +122,88 @@ def run_command(command: Sequence[str], request: AgentRequest, /) -> CommandResu
 
 
 def invoke_provider(
-    request: AgentRequest,
+    request: agent_declarations.AgentRequest,
     provider: str,
     executable: str,
     model: str | None,
     command: Sequence[str],
-    parse: Callable[[CommandResult], tuple[str, ProviderSessionId | None, str]],
+    parse: Callable[
+        [CommandResult], tuple[str, ids.ProviderSessionId | None, str]
+    ],
     /,
-) -> AgentReply:
+) -> agent_declarations.AgentReply:
     """Own the lifecycle shared by every command-backed provider."""
-
     validate_session_request(request, provider)
-    begin(request, provider, model)
-    started = monotonic()
+    _artifacts.begin(request, provider, model)
+    started = time.monotonic()
     returncode: int | None = None
     try:
         result = run_command(command, request)
         returncode = result.returncode
         if result.returncode != 0:
-            raise AgentInvocationError(
+            raise agent_declarations.AgentInvocationError(
                 f"{executable} exited with {result.returncode}: "
-                f"{failure_detail(result.stderr, result.events)}"
+                f"{_artifacts.failure_detail(result.stderr, result.events)}"
             )
         response, provider_session_id, reasoning = parse(result)
-        if request.provider_session_action is AgentSessionAction.FORK:
+        if (
+            request.provider_session_action
+            is agent_declarations.AgentSessionAction.FORK
+        ):
             if provider_session_id is None:
-                raise AgentInvocationError(
+                raise agent_declarations.AgentInvocationError(
                     f"{provider} fork returned no provider session"
                 )
             if provider_session_id == request.provider_session_id:
-                raise AgentInvocationError(
+                raise agent_declarations.AgentInvocationError(
                     f"{provider} fork returned its source provider session"
                 )
         else:
-            provider_session_id = provider_session_id or request.provider_session_id
-    except (AgentInvocationError, OSError, UnicodeError, ValueError) as error:
-        metadata(
+            provider_session_id = (
+                provider_session_id or request.provider_session_id
+            )
+    except (
+        agent_declarations.AgentInvocationError,
+        OSError,
+        UnicodeError,
+        ValueError,
+    ) as error:
+        _artifacts.metadata(
             request,
             provider,
             model,
             status="failed",
-            duration_seconds=monotonic() - started,
+            duration_seconds=time.monotonic() - started,
             returncode=returncode,
             provider_session_id=request.provider_session_id,
         )
-        if isinstance(error, AgentInvocationError):
+        if isinstance(error, agent_declarations.AgentInvocationError):
             raise
-        raise AgentInvocationError(
+        raise agent_declarations.AgentInvocationError(
             f"{executable} invocation failed: {error}"
         ) from error
     except Exception:
         raise
     except BaseException:
-        metadata(
+        _artifacts.metadata(
             request,
             provider,
             model,
             status="cancelled",
-            duration_seconds=monotonic() - started,
+            duration_seconds=time.monotonic() - started,
             returncode=returncode,
             provider_session_id=request.provider_session_id,
         )
         raise
-    complete(
+    _artifacts.complete(
         request,
         provider,
         model,
         reasoning,
-        duration_seconds=monotonic() - started,
+        duration_seconds=time.monotonic() - started,
         returncode=result.returncode,
         provider_session_id=provider_session_id,
     )
-    return AgentReply(text=response, provider_session_id=provider_session_id)
+    return agent_declarations.AgentReply(
+        text=response, provider_session_id=provider_session_id
+    )

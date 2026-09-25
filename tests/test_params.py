@@ -7,8 +7,9 @@ from types import ModuleType
 from typing import Any, cast
 
 import pytest
-import verdog_runtime.interpreter.execution as execution_module
 from report_helpers import call_reports, table_rows
+
+import verdog_runtime.interpreter.execution as execution_module
 from verdog_runtime.declarations import (
     CallContext,
     CallVisitDefinition,
@@ -62,10 +63,12 @@ def _workflow(
             definition_module=module_name,
             params_types=params_types,
             profile_arguments={
-                parameter.id: parameter.id for parameter in graph.profile_parameters
+                parameter.id: parameter.id
+                for parameter in graph.profile_parameters
             },
             session_arguments={
-                parameter.id: parameter.id for parameter in graph.session_parameters
+                parameter.id: parameter.id
+                for parameter in graph.session_parameters
             },
         ),
         configuration=WorkflowConfiguration(),
@@ -136,26 +139,28 @@ def test_subroutine_calls_share_defaults_and_override_one_invocation(
         state_type=EmptyState,
         operation=python_type(),
     )
-    child_graph: GraphDefinition[int, int, ChildParams, object] = GraphDefinition(
-        id=GraphId("sample.parent__child"),
-        params_type=ChildParams,
-        enter=child_enter,
-        exit=child_exit,
-        failure=child_failure,
-        nodes=(child_node,),
-        edges=(
-            EdgeDefinition(
-                id=EdgeId("child_in"),
-                source=child_enter.id,
-                target=child_node.id,
-                visit=VisitDefinition(implementation=child_run),
+    child_graph: GraphDefinition[int, int, ChildParams, object] = (
+        GraphDefinition(
+            id=GraphId("sample.parent__child"),
+            params_type=ChildParams,
+            enter=child_enter,
+            exit=child_exit,
+            failure=child_failure,
+            nodes=(child_node,),
+            edges=(
+                EdgeDefinition(
+                    id=EdgeId("child_in"),
+                    source=child_enter.id,
+                    target=child_node.id,
+                    visit=VisitDefinition(implementation=child_run),
+                ),
+                EdgeDefinition(
+                    id=EdgeId("child_out"),
+                    source=child_node.id,
+                    target=child_exit.id,
+                ),
             ),
-            EdgeDefinition(
-                id=EdgeId("child_out"),
-                source=child_node.id,
-                target=child_exit.id,
-            ),
-        ),
+        )
     )
     child_definition = SubroutineDefinition(graph=child_graph)
 
@@ -208,7 +213,10 @@ def test_subroutine_calls_share_defaults_and_override_one_invocation(
     initialized: list[ParentParams] = []
 
     def initialize(
-        input: int, state: FeatureState[object], context: NodeContext[ParentParams], /
+        input: int,
+        state: FeatureState[object],
+        context: NodeContext[ParentParams],
+        /,
     ) -> FeatureSuccess[object]:
         initialized.append(context.params)
         return FeatureSuccess(state=state.replace(seed, context.params.seed))
@@ -240,53 +248,57 @@ def test_subroutine_calls_share_defaults_and_override_one_invocation(
         )
         for index in range(4)
     )
-    parent_graph: GraphDefinition[int, int, ParentParams, object] = GraphDefinition(
-        id=GraphId("sample.parent"),
-        params_type=ParentParams,
-        enter=parent_enter,
-        exit=parent_exit,
-        failure=parent_failure,
-        nodes=(initialize_node, *calls),
-        edges=(
-            EdgeDefinition(
-                id=EdgeId("initialize"),
-                source=parent_enter.id,
-                target=initialize_node.id,
-                visit=VisitDefinition(implementation=initialize),
-            ),
-            EdgeDefinition(
-                id=EdgeId("in"),
-                source=initialize_node.id,
-                target=calls[0].id,
-                effects=(
-                    NumericalFeatureEffect(
-                        feature_id=seed.id,
-                        observation=NumericalEffectObservation.UNCONSTRAINED,
-                    ),
+    parent_graph: GraphDefinition[int, int, ParentParams, object] = (
+        GraphDefinition(
+            id=GraphId("sample.parent"),
+            params_type=ParentParams,
+            enter=parent_enter,
+            exit=parent_exit,
+            failure=parent_failure,
+            nodes=(initialize_node, *calls),
+            edges=(
+                EdgeDefinition(
+                    id=EdgeId("initialize"),
+                    source=parent_enter.id,
+                    target=initialize_node.id,
+                    visit=VisitDefinition(implementation=initialize),
                 ),
-                visit=CallVisitDefinition(implementation=call_default),
+                EdgeDefinition(
+                    id=EdgeId("in"),
+                    source=initialize_node.id,
+                    target=calls[0].id,
+                    effects=(
+                        NumericalFeatureEffect(
+                            feature_id=seed.id,
+                            observation=NumericalEffectObservation.UNCONSTRAINED,
+                        ),
+                    ),
+                    visit=CallVisitDefinition(implementation=call_default),
+                ),
+                EdgeDefinition(
+                    id=EdgeId("override"),
+                    source=calls[0].id,
+                    target=calls[1].id,
+                    visit=CallVisitDefinition(implementation=call_override),
+                ),
+                EdgeDefinition(
+                    id=EdgeId("explicit_none"),
+                    source=calls[1].id,
+                    target=calls[2].id,
+                    visit=CallVisitDefinition(implementation=call_none),
+                ),
+                EdgeDefinition(
+                    id=EdgeId("default_again"),
+                    source=calls[2].id,
+                    target=calls[3].id,
+                    visit=CallVisitDefinition(implementation=call_default),
+                ),
+                EdgeDefinition(
+                    id=EdgeId("out"), source=calls[3].id, target=parent_exit.id
+                ),
             ),
-            EdgeDefinition(
-                id=EdgeId("override"),
-                source=calls[0].id,
-                target=calls[1].id,
-                visit=CallVisitDefinition(implementation=call_override),
-            ),
-            EdgeDefinition(
-                id=EdgeId("explicit_none"),
-                source=calls[1].id,
-                target=calls[2].id,
-                visit=CallVisitDefinition(implementation=call_none),
-            ),
-            EdgeDefinition(
-                id=EdgeId("default_again"),
-                source=calls[2].id,
-                target=calls[3].id,
-                visit=CallVisitDefinition(implementation=call_default),
-            ),
-            EdgeDefinition(id=EdgeId("out"), source=calls[3].id, target=parent_exit.id),
-        ),
-        features=(seed,),
+            features=(seed,),
+        )
     )
 
     result = Dispatcher(project_root=tmp_path).run(
@@ -325,13 +337,13 @@ def test_subroutine_calls_share_defaults_and_override_one_invocation(
         strict=True,
     ):
         child_output = child_report.parent
-        assert child_output == (
-            output / str(call.id) / "000001"
-        ).resolve()
+        assert child_output == (output / str(call.id) / "000001").resolve()
         assert table_rows(child_report) == [expected]
         child_rows = table_rows(child_output / "stats.md", "Nodes")
         assert {row[1] for row in child_rows} == {str(child_graph.id)}
-        assert any(row[2:5] == ["child_work", "python", "1"] for row in child_rows)
+        assert any(
+            row[2:5] == ["child_work", "python", "1"] for row in child_rows
+        )
         assert call_reports(child_output / "config.md") == []
         assert call_reports(child_output / "stats.md") == []
     for name in ("config.md", "stats.md"):
@@ -351,7 +363,8 @@ def test_subroutine_calls_share_defaults_and_override_one_invocation(
     )
     assert all(
         any(
-            row[1:5] == [str(parent_graph.id), str(call.id), "subroutine_call", "1"]
+            row[1:5]
+            == [str(parent_graph.id), str(call.id), "subroutine_call", "1"]
             for row in rows
         )
         for call in calls
@@ -360,7 +373,9 @@ def test_subroutine_calls_share_defaults_and_override_one_invocation(
 
 @pytest.mark.parametrize("call_type", [WorkflowCall, CustomWorkflowCall])
 def test_workflow_call_delegates_parameter_defaults_to_child(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call_type: type[WorkflowCall]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call_type: type[WorkflowCall],
 ) -> None:
     child_workflow_id = GraphId("child.workflow")
     child_path = "external/child"
@@ -372,7 +387,7 @@ def test_workflow_call_delegates_parameter_defaults_to_child(
             int, kwargs["transitions_remaining"]
         )
 
-    monkeypatch.setattr(execution_module, "invoke_child_process", fake_child)
+    monkeypatch.setattr(execution_module.child_module, "invoke", fake_child)
 
     def adapt(
         input: int,
@@ -425,7 +440,8 @@ def test_workflow_call_delegates_parameter_defaults_to_child(
     assert "params_override" not in captured
     rows = table_rows(tmp_path / "workflow-output/stats.md", "Nodes")
     assert any(
-        row[1:5] == [str(graph.id), "call", "workflow_call", "1"] for row in rows
+        row[1:5] == [str(graph.id), "call", "workflow_call", "1"]
+        for row in rows
     )
     assert (
         not {
@@ -452,4 +468,6 @@ def test_missing_required_parameter_value_names_its_address() -> None:
             {address: RequiredParams},
             {},
         )
-    assert any("parameter value is missing" in note for note in caught.value.__notes__)
+    assert any(
+        "parameter value is missing" in note for note in caught.value.__notes__
+    )

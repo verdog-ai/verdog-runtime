@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -55,7 +55,9 @@ def test_definition_identifiers_use_ascii_non_keyword_leaves() -> None:
     assert not is_valid_entity_id("child__nested")
 
 
-def _definition(graph_id: str) -> SubroutineDefinition[object, object, None, object]:
+def _definition(
+    graph_id: str,
+) -> SubroutineDefinition[object, object, None, object]:
     enter = PortDefinition(id=NodeId("enter"))
     exit_ = PortDefinition(id=NodeId("exit"))
     return SubroutineDefinition(
@@ -67,7 +69,9 @@ def _definition(graph_id: str) -> SubroutineDefinition[object, object, None, obj
             failure=PortDefinition(id=NodeId("failure")),
             nodes=(),
             edges=(
-                EdgeDefinition(id=EdgeId("pass"), source=enter.id, target=exit_.id),
+                EdgeDefinition(
+                    id=EdgeId("pass"), source=enter.id, target=exit_.id
+                ),
             ),
         )
     )
@@ -79,7 +83,7 @@ def _module(
     definition: SubroutineDefinition[object, object, None, object],
 ) -> None:
     module = ModuleType(name)
-    setattr(module, "definition", lambda: definition)
+    module.__dict__["definition"] = lambda: definition
     monkeypatch.setitem(sys.modules, name, module)
 
 
@@ -94,7 +98,9 @@ def _subroutine_call(definition_id: str, module: str) -> SubroutineCall:
 
 
 def _workflow_call(definition_id: str, module: str) -> WorkflowCall:
-    return WorkflowCall(definition_id=GraphId(definition_id), definition_module=module)
+    return WorkflowCall(
+        definition_id=GraphId(definition_id), definition_module=module
+    )
 
 
 def test_calls_import_exact_modules_and_enforce_lexical_visibility(
@@ -132,7 +138,9 @@ def test_calls_import_exact_modules_and_enforce_lexical_visibility(
     sibling, sibling_scope = local_subroutine(
         tmp_path,
         scope,
-        _subroutine_call("scoped.main__sibling", modules["scoped.main__sibling"]),
+        _subroutine_call(
+            "scoped.main__sibling", modules["scoped.main__sibling"]
+        ),
     )
     assert sibling is definitions["scoped.main__sibling"]
     with pytest.raises(LookupError, match="not lexically visible"):
@@ -172,20 +180,24 @@ def test_external_subroutine_needs_no_project_manifest(
         tmp_path, _subroutine_call("scoped.main__child", module)
     )
     assert loaded is definition
-    assert scope == CallScope(GraphId("scoped.main__child"), GraphId("scoped.main"))
+    assert scope == CallScope(
+        GraphId("scoped.main__child"), GraphId("scoped.main")
+    )
     assert not (tmp_path / "project.json").exists()
 
 
 def test_workflow_scope_is_derived_from_the_loaded_definition() -> None:
     subroutine = _definition("scoped.main__child")
-    workflow: WorkflowDefinition[object, object, None, object] = WorkflowDefinition(
-        id=GraphId("scoped.main__child"),
-        input_type=object,
-        entry=_subroutine_call(
-            str(subroutine.graph.id),
-            "scoped.subroutines.main.subroutines.child",
-        ),
-        configuration=WorkflowConfiguration(),
+    workflow: WorkflowDefinition[object, object, None, object] = (
+        WorkflowDefinition(
+            id=GraphId("scoped.main__child"),
+            input_type=object,
+            entry=_subroutine_call(
+                str(subroutine.graph.id),
+                "scoped.subroutines.main.subroutines.child",
+            ),
+            configuration=WorkflowConfiguration(),
+        )
     )
     assert workflow_scope(workflow) == CallScope(
         GraphId("scoped.main__child"),

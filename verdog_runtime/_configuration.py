@@ -1,19 +1,19 @@
 """Human-readable values supplied to a runtime visit."""
 
+import dataclasses
+import itertools
 import json
+import os.path
+import pathlib
 import re
+import urllib.parse
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, fields, is_dataclass
-from os.path import relpath
-from pathlib import Path
 from typing import cast
-from urllib.parse import quote
 
-from ._markdown import format_cell, format_table
-from ._statistics import TimingRecord
+from verdog_runtime import _markdown, _statistics
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ConfigurationValue:
     name: str
     value: object
@@ -22,13 +22,13 @@ class ConfigurationValue:
 def _rows(
     name: str, value: object, ancestors: frozenset[int]
 ) -> Iterator[tuple[str, object]]:
-    if not is_dataclass(value) or isinstance(value, type):
+    if not dataclasses.is_dataclass(value) or isinstance(value, type):
         yield name or "params", value
     elif id(value) in ancestors:
         yield name or "params", "[cycle]"
     else:
         ancestors = ancestors | {id(value)}
-        for item in fields(value):
+        for item in dataclasses.fields(value):
             field_name = f"{name}.{item.name}" if name else item.name
             if not item.repr:
                 yield field_name, "[redacted]"
@@ -41,26 +41,32 @@ def _rows(
             yield from _rows(field_name, field_value, ancestors)
 
 
-def write_configuration(report_dir: Path, values: Iterable[ConfigurationValue]) -> None:
-    rows = (
-        row for entry in values for row in _rows(entry.name, entry.value, frozenset())
+def write_configuration(
+    report_dir: pathlib.Path, values: Iterable[ConfigurationValue]
+) -> None:
+    rows = itertools.chain.from_iterable(
+        _rows(entry.name, entry.value, frozenset()) for entry in values
     )
-    table = format_table(rows, ("Parameter", "Value"))
+    table = _markdown.format_table(rows, ("Parameter", "Value"))
     (report_dir / "config.md").write_text(
-        f"# Configuration\n\n{table}\n", encoding="utf-8", errors="backslashreplace"
+        f"# Configuration\n\n{table}\n",
+        encoding="utf-8",
+        errors="backslashreplace",
     )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class _InvocationCall:
     label: str
-    directory: Path
+    directory: pathlib.Path
 
 
 _INVOCATION_PARENT = ".verdog-invocation.json"
 
 
-def _relative_output(root: Path, value: Path, /) -> Path:
+def _relative_output(
+    root: pathlib.Path, value: pathlib.Path, /
+) -> pathlib.Path:
     if value.is_absolute():
         raise ValueError("invocation report path must be relative")
     resolved_root = root.resolve()
@@ -71,17 +77,16 @@ def _relative_output(root: Path, value: Path, /) -> Path:
 
 
 def register_invocation(
-    root: Path,
-    child_output: Path,
-    parent_graph: Path,
-    call_visit: Path,
+    root: pathlib.Path,
+    child_output: pathlib.Path,
+    parent_graph: pathlib.Path,
+    call_visit: pathlib.Path,
     graph_id: str | None,
     /,
     *,
-    parent_report: Path,
+    parent_report: pathlib.Path,
 ) -> None:
     """Persist a child graph's parentage independently of directory nesting."""
-
     child_directory = _relative_output(root, child_output)
     _relative_output(root, parent_graph)
     _relative_output(root, parent_report)
@@ -101,8 +106,8 @@ def register_invocation(
 
 
 def _registered_call(
-    root: Path, graph: Path, graph_id: str, /
-) -> tuple[Path, _InvocationCall] | None:
+    root: pathlib.Path, graph: pathlib.Path, graph_id: str, /
+) -> tuple[pathlib.Path, _InvocationCall] | None:
     child_directory = _relative_output(root, graph)
     metadata = child_directory / _INVOCATION_PARENT
     if not metadata.is_file():
@@ -131,13 +136,15 @@ def _registered_call(
     ):
         raise ValueError("invalid invocation report parent metadata")
     if registered_graph_id is not None and registered_graph_id != graph_id:
-        raise ValueError("invocation report graph id does not match its metadata")
-    parent_graph = Path(parent_value)
-    call_visit = Path(call_value)
+        raise ValueError(
+            "invocation report graph id does not match its metadata"
+        )
+    parent_graph = pathlib.Path(parent_value)
+    call_visit = pathlib.Path(call_value)
     report_value = raw.get("parent_report", parent_graph.parent.as_posix())
     if not isinstance(report_value, str) or not report_value:
         raise ValueError("invalid invocation report parent metadata")
-    parent = _relative_output(root, Path(report_value))
+    parent = _relative_output(root, pathlib.Path(report_value))
     _relative_output(root, call_visit)
     try:
         call_path = call_visit.relative_to(parent_graph).as_posix()
@@ -148,18 +155,24 @@ def _registered_call(
     return parent, _InvocationCall(f"{call_path} — {graph_id}", child_directory)
 
 
-def _call_link(call: _InvocationCall, parent: Path, filename: str) -> str:
-    label = re.sub(r"([\\`*_\[\]])", r"\\\1", format_cell(call.label))
-    target = Path(relpath(call.directory / filename, start=parent)).as_posix()
-    return f"- [{label}]({quote(target, safe='/')})\n"
+def _call_link(
+    call: _InvocationCall, parent: pathlib.Path, filename: str
+) -> str:
+    label = re.sub(r"([\\`*_\[\]])", r"\\\1", _markdown.format_cell(call.label))
+    target = pathlib.Path(
+        os.path.relpath(call.directory / filename, start=parent)
+    ).as_posix()
+    return f"- [{label}]({urllib.parse.quote(target, safe='/')})\n"
 
 
-def _append(report: Path, text: str) -> None:
-    with report.open("a", encoding="utf-8", errors="backslashreplace") as stream:
+def _append(report: pathlib.Path, text: str) -> None:
+    with report.open(
+        "a", encoding="utf-8", errors="backslashreplace"
+    ) as stream:
         stream.write(text)
 
 
-def _calls_heading(report: Path, /) -> str:
+def _calls_heading(report: pathlib.Path, /) -> str:
     if report.is_file() and "\n## Calls\n\n" in report.read_text(
         encoding="utf-8", errors="replace"
     ):
@@ -170,18 +183,20 @@ def _calls_heading(report: Path, /) -> str:
 class InvocationReports:
     """Link observed invocations from the root process's timing stream."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: pathlib.Path) -> None:
         self.root = root
-        self._directories: dict[Path, Path] = {}
-        self._calls: dict[Path, list[_InvocationCall]] = {}
+        self._directories: dict[pathlib.Path, pathlib.Path] = {}
+        self._calls: dict[pathlib.Path, list[_InvocationCall]] = {}
 
-    def __call__(self, record: TimingRecord) -> None:
-        graph = Path(record.path).parent.parent
+    def __call__(self, record: _statistics.TimingRecord) -> None:
+        graph = pathlib.Path(record.path).parent.parent
         if graph in self._directories:
             return
         registered = _registered_call(self.root, graph, record.graph_id)
         directory = (
-            registered[1].directory if registered is not None else self.root / graph
+            registered[1].directory
+            if registered is not None
+            else self.root / graph
         )
         if not (directory / "config.md").is_file():
             directory = self.root / graph.parent
@@ -200,7 +215,9 @@ class InvocationReports:
             if parent is None:
                 return
             call_path = directory.relative_to(parent).as_posix()
-            call = _InvocationCall(f"{call_path} — {record.graph_id}", directory)
+            call = _InvocationCall(
+                f"{call_path} — {record.graph_id}", directory
+            )
         else:
             parent, call = registered
         if not (parent / "config.md").is_file():
@@ -219,12 +236,12 @@ class InvocationReports:
             if not report.is_file():
                 continue
             existing = report.read_text(encoding="utf-8", errors="replace")
-            links = "".join(
-                link
-                for call in calls
-                if (call.directory / "stats.md").is_file()
-                for link in (_call_link(call, directory, "stats.md"),)
-                if link not in existing
-            )
+            links: list[str] = []
+            for call in calls:
+                if not (call.directory / "stats.md").is_file():
+                    continue
+                link = _call_link(call, directory, "stats.md")
+                if link not in existing:
+                    links.append(link)
             if links:
-                _append(report, _calls_heading(report) + links)
+                _append(report, _calls_heading(report) + "".join(links))

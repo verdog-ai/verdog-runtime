@@ -20,7 +20,14 @@ Repository = "https://github.com/verdog-ai/verdog-runtime"
 Documentation = "https://github.com/verdog-ai/verdog-website/tree/main/site"
 
 [dependency-groups]
-dev = ["pytest", "pyright==1.1.411", "types-tabulate"]
+dev = [
+    "pytest",
+    "pyright==1.1.411",
+    "types-tabulate",
+    "ruff==0.16.9",
+    "pylint==4.0.9",
+    "radon==6.0.1",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -30,3 +37,26 @@ include = ["verdog_runtime*"]
 
 [tool.setuptools.package-data]
 verdog_runtime = ["py.typed"]
+
+[tool.ruff]
+line-length = 80
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "TID252", "D"]
+# Runtime generic parameters are inspected by tyro and persisted in checkpoints.
+# Changing their representation is an API change, not a style-only rewrite.
+ignore = ["UP040", "UP046", "UP047"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names and assertions document the behavior; helpers need no public API docs.
+"tests/**" = ["D"]
+
+[tool.ruff.format]
+docstring-code-format = true

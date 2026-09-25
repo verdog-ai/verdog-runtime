@@ -43,7 +43,7 @@ def test_handlers_preserve_typed_values_and_context(tmp_path: Path) -> None:
         assert received.params is params
         return expected
 
-    python_result = (python.execute(visit_python, 7, 2, context))
+    python_result = python.execute(visit_python, 7, 2, context)
     assert_type(python_result, Success[str, int])
     assert python_result is expected
 
@@ -62,8 +62,8 @@ def test_handlers_preserve_typed_values_and_context(tmp_path: Path) -> None:
         feature_results.append(result)
         return result
 
-    feature_result = (
-        feature.execute(visit_feature, "input", workflow_state, context)
+    feature_result = feature.execute(
+        visit_feature, "input", workflow_state, context
     )
     assert_type(feature_result, FeatureSuccess[Scope])
     assert feature_result is feature_results[0]

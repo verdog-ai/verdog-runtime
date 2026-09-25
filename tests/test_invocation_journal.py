@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
 from verdog_runtime.agents import AgentReply, AgentRequest, AgentSessionAction
 from verdog_runtime.declarations import AgentAccess, NodeContext
 from verdog_runtime.declarations.ids import (
@@ -26,7 +27,9 @@ from verdog_runtime.interpreter._invocations import (
 
 
 def _request(output: Path, workspace: Path) -> AgentRequest:
-    artifact = output / "graph-main" / "agent" / "000001" / "invocations" / "000001"
+    artifact = (
+        output / "graph-main" / "agent" / "000001" / "invocations" / "000001"
+    )
     artifact.mkdir(parents=True)
     return AgentRequest(
         prompt="find a proof",
@@ -70,7 +73,9 @@ def test_started_invocation_refuses_plain_resume_and_retry_is_explicit(
     assert json.loads(record_path.read_text("utf-8"))["status"] == "started"
 
     resumed = InvocationJournal(output)
-    with pytest.raises(InvocationJournalError, match="--retry-incomplete") as captured:
+    with pytest.raises(
+        InvocationJournalError, match="--retry-incomplete"
+    ) as captured:
         resumed.prepare(address, request, "test")
     assert captured.value.code == "invocation.ambiguous"
 
@@ -108,7 +113,9 @@ def test_completed_invocation_replays_reply_without_another_attempt(
     assert "find a proof" not in record_path.read_text("utf-8")
 
 
-def test_resume_refuses_a_changed_request_at_the_same_boundary(tmp_path: Path) -> None:
+def test_resume_refuses_a_changed_request_at_the_same_boundary(
+    tmp_path: Path,
+) -> None:
     output, workspace = _journal_root(tmp_path)
     request = _request(output, workspace)
     journal = InvocationJournal(output)
@@ -144,7 +151,9 @@ def test_transition_epoch_separates_repeated_visits(tmp_path: Path) -> None:
     assert len(tuple((output / ".verdog/invocations").glob("*.json"))) == 2
 
 
-@pytest.mark.parametrize("workspace_relative", (Path("."), Path(".verdog/workspace")))
+@pytest.mark.parametrize(
+    "workspace_relative", (Path("."), Path(".verdog/workspace"))
+)
 def test_attempt_specific_output_paths_are_normalized_for_replay(
     tmp_path: Path,
     workspace_relative: Path,
@@ -171,7 +180,9 @@ def test_attempt_specific_output_paths_are_normalized_for_replay(
     second_artifact.mkdir(parents=True)
     second_workspace = second_output / workspace_relative
     second_workspace.mkdir(parents=True, exist_ok=True)
-    (second_workspace / "candidate.py").write_text("candidate", encoding="utf-8")
+    (second_workspace / "candidate.py").write_text(
+        "candidate", encoding="utf-8"
+    )
     second = replace(
         first,
         prompt=f"inspect {second_workspace / 'candidate.py'}",

@@ -4,9 +4,10 @@ import json
 from pathlib import Path
 
 import pytest
+
 from verdog_runtime._lifecycle import (
-    LifecycleCommand,
     LIFECYCLE_COMMAND_VERSION,
+    LifecycleCommand,
     decode_lifecycle_command,
     encode_lifecycle_command,
 )
@@ -46,7 +47,9 @@ def test_lifecycle_command_round_trips_workflow_arguments_exactly(
         arguments=("--input.value", "--verdog-lifecycle", "雪"),
     )
 
-    assert decode_lifecycle_command(encode_lifecycle_command(command)) == command
+    assert (
+        decode_lifecycle_command(encode_lifecycle_command(command)) == command
+    )
 
 
 @pytest.mark.parametrize(

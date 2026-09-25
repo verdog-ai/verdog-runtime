@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from verdog_runtime.cli.api import Service, ServiceError
 from verdog_runtime.cli.local import Clone, WorkspaceError
 from verdog_runtime.cli.manage import blank_graph
@@ -21,7 +22,10 @@ def _clone(root: Path, package: str = "test.project") -> Clone:
         json.dumps(blank_graph(package, "Research workflow")), encoding="utf-8"
     )
     requirements = (
-        root / "src" / Path(*package.split(".")) / "workflows/main/requirements.txt"
+        root
+        / "src"
+        / Path(*package.split("."))
+        / "workflows/main/requirements.txt"
     )
     requirements.parent.mkdir(parents=True)
     requirements.write_text("zeta>=2\nalpha==1\n", encoding="utf-8")
@@ -37,15 +41,21 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 
 
 def test_describe_json_is_canonical_and_read_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from verdog_runtime.cli import main as cli
 
     clone = _clone(tmp_path / "project")
     requirements = (
-        clone.root / clone.workflow_definition("main").source / "requirements.txt"
+        clone.root
+        / clone.workflow_definition("main").source
+        / "requirements.txt"
     )
-    requirements.write_text("zeta >= 2\nrequests [security] >= 2\n", encoding="utf-8")
+    requirements.write_text(
+        "zeta >= 2\nrequests [security] >= 2\n", encoding="utf-8"
+    )
     before = _snapshot(clone.root)
     monkeypatch.chdir(clone.root)
 
@@ -139,7 +149,10 @@ def test_catalogue_client_encodes_filters_and_publication_environment(
     monkeypatch.setattr(Service, "json", request)
     service = Service("http://unused")
     service.catalogue(
-        query="proof search", visibility="restricted", limit=25, cursor="page/+="
+        query="proof search",
+        visibility="restricted",
+        limit=25,
+        cursor="page/+=",
     )
     service.publish(
         "ada/tools",
@@ -218,9 +231,12 @@ def test_publish_sends_the_same_canonical_description(
         assert repository == "ada/tools"
         return "d" * 40
 
+    git = manage.local.git
+
     def clean(root: Path, *arguments: str) -> str:
-        del root, arguments
-        return ""
+        if arguments[0] == "status":
+            return ""
+        return git(root, *arguments)
 
     def checked(ignored: Clone) -> tuple[int, dict[str, Any]]:
         del ignored
@@ -229,7 +245,7 @@ def test_publish_sends_the_same_canonical_description(
     monkeypatch.setattr(manage, "_here", lambda: clone)
     monkeypatch.setattr(manage, "_client", catalogue)
     monkeypatch.setattr(manage, "clone_head", head)
-    monkeypatch.setattr(manage, "git", clean)
+    monkeypatch.setattr(manage.local, "git", clean)
     monkeypatch.setattr(cli, "check_clone_result", checked)
 
     assert (
@@ -406,7 +422,9 @@ def test_owned_unpublished_import_reads_package_before_project_mutation(
     monkeypatch.setattr(manage, "_client", catalogue)
     monkeypatch.setattr(manage, "_remote_package", remote_package)
     commit = "c" * 40
-    with pytest.raises(WorkspaceError, match=".gitmodules is not a regular file"):
+    with pytest.raises(
+        WorkspaceError, match=".gitmodules is not a regular file"
+    ):
         manage._import(  # pyright: ignore[reportPrivateUsage]
             argparse.Namespace(
                 reference=f"ada/tools@{commit}",
@@ -486,7 +504,9 @@ def test_import_rolls_back_when_the_exact_checkout_disagrees_with_metadata(
             for item in arguments
         ]
         if arguments[:2] == ("submodule", "add"):
-            return local_git(root, "-c", "protocol.file.allow=always", *rewritten)
+            return local_git(
+                root, "-c", "protocol.file.allow=always", *rewritten
+            )
         return local_git(root, *rewritten)
 
     def catalogue(ignored: Clone | None = None) -> Catalogue:
@@ -495,8 +515,10 @@ def test_import_rolls_back_when_the_exact_checkout_disagrees_with_metadata(
 
     monkeypatch.setattr(manage, "_here", lambda: consumer)
     monkeypatch.setattr(manage, "_client", catalogue)
-    monkeypatch.setattr(manage, "git", local_transport)
-    with pytest.raises(WorkspaceError, match="contains package 'actual.package'"):
+    monkeypatch.setattr(manage.local, "git", local_transport)
+    with pytest.raises(
+        WorkspaceError, match="contains package 'actual.package'"
+    ):
         manage._import(  # pyright: ignore[reportPrivateUsage]
             argparse.Namespace(
                 reference=f"ada/tools@{commit}",
@@ -529,11 +551,15 @@ def test_sync_and_errors_use_one_json_object_on_stdout(
     clone = _clone(tmp_path / "project")
     monkeypatch.chdir(clone.root)
 
-    def synced(selected: Clone, *, workflow_id: str | None, only_binary: bool) -> int:
+    def synced(
+        selected: Clone, *, workflow_id: str | None, only_binary: bool
+    ) -> int:
         assert selected.root == clone.root
         assert workflow_id == "main"
         assert only_binary
-        environment = selected.environment(selected.workflow_definition(workflow_id))
+        environment = selected.environment(
+            selected.workflow_definition(workflow_id)
+        )
         interpreter = environment / "bin/python"
         interpreter.parent.mkdir(parents=True)
         base_interpreter = tmp_path / "base-python"
@@ -541,12 +567,12 @@ def test_sync_and_errors_use_one_json_object_on_stdout(
         try:
             interpreter.symlink_to(base_interpreter)
         except OSError:
-            # A platform without unprivileged symlinks still exercises the receipt schema.
+            # Exercise the receipt schema even without unprivileged symlinks.
             interpreter.write_text("", encoding="utf-8")
         print("prepared")
         return 0
 
-    monkeypatch.setattr(cli, "sync_environment", synced)
+    monkeypatch.setattr(cli.sync, "sync", synced)
     assert cli.main(["sync", "main", "--only-binary", "--json"]) == 0
     captured = capsys.readouterr()
     result = json.loads(captured.out)
@@ -557,7 +583,8 @@ def test_sync_and_errors_use_one_json_object_on_stdout(
             clone.environment(clone.workflow_definition("main")).resolve()
         ),
         "interpreter": str(
-            clone.environment(clone.workflow_definition("main")).resolve() / "bin/python"
+            clone.environment(clone.workflow_definition("main")).resolve()
+            / "bin/python"
         ),
         "only_binary": True,
         "requirements": ["alpha==1", "zeta>=2"],
@@ -627,7 +654,7 @@ def test_catalogue_json_preserves_structured_service_errors(
             machine_message="the catalogue cursor is invalid",
         )
 
-    monkeypatch.setattr(manage, "account", unavailable)
+    monkeypatch.setattr(manage.session, "account", unavailable)
     assert cli.main(["catalogue", "--json"]) == 1
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
@@ -657,7 +684,7 @@ def test_retract_reports_the_entry_id_after_an_empty_204_response(
     def catalogue() -> Catalogue:
         return Catalogue()
 
-    monkeypatch.setattr(manage, "account", catalogue)
+    monkeypatch.setattr(manage.session, "account", catalogue)
     entry_id = "90f34130-ce57-4549-b851-9b20edcec188"
     assert (
         manage._retract(  # pyright: ignore[reportPrivateUsage]

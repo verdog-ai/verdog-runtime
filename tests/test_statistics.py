@@ -10,9 +10,14 @@ from test_agents import (
     _RecordingInvoker,  # pyright: ignore[reportPrivateUsage]
     _workflow,  # pyright: ignore[reportPrivateUsage]
 )
+
 from verdog_runtime import ExecutionCancelled, _statistics
 from verdog_runtime._statistics import RunStatistics, TimingRecord
-from verdog_runtime.declarations import AgentNodeContext, Success, WorkflowConfiguration
+from verdog_runtime.declarations import (
+    AgentNodeContext,
+    Success,
+    WorkflowConfiguration,
+)
 from verdog_runtime.declarations.ids import AgentProfileId
 from verdog_runtime.interpreter import Dispatcher
 
@@ -21,7 +26,8 @@ def _rows(output_dir: Path, section: str) -> list[list[str]]:
     report = (output_dir / "stats.md").read_text("utf-8")
     table = report.split(f"## {section}\n\n", 1)[1].split("\n\n", 1)[0]
     return [
-        [cell.strip() for cell in line.split("|")[1:-1]] for line in table.splitlines()
+        [cell.strip() for cell in line.split("|")[1:-1]]
+        for line in table.splitlines()
     ]
 
 
@@ -43,7 +49,7 @@ def test_repeated_visits_produce_compact_tables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, node_type: str
 ) -> None:
     now = 100.0
-    monkeypatch.setattr(_statistics, "monotonic", lambda: now)
+    monkeypatch.setattr(_statistics.time, "monotonic", lambda: now)
     records: list[TimingRecord] = []
     statistics = RunStatistics(tmp_path, record_handler=records.append)
     for visit in range(1, 26):
@@ -60,11 +66,21 @@ def test_repeated_visits_produce_compact_tables(
     now = 204.0
     statistics.write()
 
-    assert {path.name for path in tmp_path.iterdir()} == {"trace.log", "stats.md"}
+    assert {path.name for path in tmp_path.iterdir()} == {
+        "trace.log",
+        "stats.md",
+    }
     kind_rows = _rows(tmp_path, "Summary")
     node_rows = _rows(tmp_path, "Nodes")
     assert kind_rows[0] == ["Type", "Visits", "Seconds"]
-    assert node_rows[0] == ["Project", "Graph", "Node", "Type", "Visits", "Seconds"]
+    assert node_rows[0] == [
+        "Project",
+        "Graph",
+        "Node",
+        "Type",
+        "Visits",
+        "Seconds",
+    ]
     assert kind_rows[2] == ["Total", "", "104.000000"]
     assert kind_rows[-1] == [node_type, "25", "75.000000"]
     assert node_rows[-1] == [".", "main", "work", node_type, "25", "75.000000"]
@@ -87,7 +103,8 @@ def test_repeated_visits_produce_compact_tables(
     lines = (tmp_path / "trace.log").read_text("utf-8").splitlines()
     assert len(lines) == 50
     assert re.fullmatch(
-        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \+\s*1\.000s\] START work/000001",
+        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+        r"\+\s*1\.000s\] START work/000001",
         lines[0],
     )
     assert lines[1].endswith(
@@ -131,7 +148,7 @@ def test_scopes_keep_local_totals_and_forward_records_on_the_shared_clock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now = 20.0
-    monkeypatch.setattr(_statistics, "monotonic", lambda: now)
+    monkeypatch.setattr(_statistics.time, "monotonic", lambda: now)
     records: list[TimingRecord] = []
     statistics = RunStatistics(
         tmp_path, started_at=0.0, record_handler=records.append
@@ -171,7 +188,9 @@ def test_scopes_keep_local_totals_and_forward_records_on_the_shared_clock(
     now = 35.0
     statistics.write()
 
-    assert [(record.node_id, record.duration_seconds) for record in records] == [
+    assert [
+        (record.node_id, record.duration_seconds) for record in records
+    ] == [
         ("work", 8.0),
         ("remote_work", 2.0),
         ("call", 12.0),
@@ -192,7 +211,9 @@ def test_scopes_keep_local_totals_and_forward_records_on_the_shared_clock(
     ]
     assert not (child_output / "trace.log").exists()
     trace = (tmp_path / "trace.log").read_text("utf-8").splitlines()
-    assert [float(line.split(" +", 1)[1].split("s]", 1)[0]) for line in trace] == [
+    assert [
+        float(line.split(" +", 1)[1].split("s]", 1)[0]) for line in trace
+    ] == [
         21.0,
         23.0,
         31.0,
@@ -203,7 +224,7 @@ def test_scopes_keep_local_totals_and_forward_records_on_the_shared_clock(
 def test_empty_run_has_total_with_blank_visits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_statistics, "monotonic", lambda: 3.0)
+    monkeypatch.setattr(_statistics.time, "monotonic", lambda: 3.0)
     RunStatistics(tmp_path, started_at=1.0).write()
 
     header, separator, total = _rows(tmp_path, "Summary")
@@ -220,7 +241,7 @@ def test_snapshot_restores_aggregates_elapsed_time_and_existing_call_links(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = 10.0
-    monkeypatch.setattr(_statistics, "monotonic", lambda: now)
+    monkeypatch.setattr(_statistics.time, "monotonic", lambda: now)
     first = RunStatistics(tmp_path).scoped(tmp_path)
     first.accept(
         TimingRecord(
@@ -273,7 +294,7 @@ def test_failed_and_cancelled_measurements_are_finalized(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: BaseException
 ) -> None:
     now = 0.0
-    monkeypatch.setattr(_statistics, "monotonic", lambda: now)
+    monkeypatch.setattr(_statistics.time, "monotonic", lambda: now)
     records: list[TimingRecord] = []
     statistics = RunStatistics(tmp_path, record_handler=records.append)
     path = "work/000001"

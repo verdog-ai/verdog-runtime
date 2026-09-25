@@ -1,9 +1,9 @@
 """Public execution policies for durable workflow operations."""
 
-from enum import StrEnum
+import enum
 
 
-class SessionPolicy(StrEnum):
+class SessionPolicy(enum.StrEnum):
     """How a new run treats persistent provider conversations."""
 
     BRANCH = "branch"

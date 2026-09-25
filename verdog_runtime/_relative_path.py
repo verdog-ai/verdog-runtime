@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+import pathlib
 
 
 def strict_posix_relative_parts(value: str, /) -> tuple[str, ...] | None:
-    """Return normalized parts only when ``value`` is already strict POSIX form."""
-
-    path = PurePosixPath(value)
+    """Return path parts if ``value`` has strict POSIX form."""
+    path = pathlib.PurePosixPath(value)
     if (
         not value
         or "\0" in value

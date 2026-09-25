@@ -3,74 +3,82 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import math
+import pathlib
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field, fields
-from pathlib import Path, PurePosixPath
 from typing import Generic, Literal, TypeAlias, TypeVar, cast, get_args
 
 import cloudpickle
 
-from ._artifact_references import decode_artifact_references
-from ._encoding import decode_base64, encode_base64
-from ._run_model import Boundary, CheckpointKind, CheckpointPolicy
-from ._statistics import TimingRecord, TimingStatus
-from .declarations.ids import GraphId, RunId, is_valid_entity_id
+from verdog_runtime import (
+    _artifact_references,
+    _encoding,
+    _run_model,
+    _statistics,
+)
+from verdog_runtime.declarations import ids
 
 VERSION = 13
 OutputT = TypeVar("OutputT", covariant=True)
-EventStatus: TypeAlias = Literal["pending", "running", "waiting", "succeeded", "failed"]
+EventStatus: TypeAlias = Literal[
+    "pending", "running", "waiting", "succeeded", "failed"
+]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class CallFrame:
     """Call metadata with payloads decoded only after loading its definition."""
 
-    type: Literal["call"] = field(default="call", init=False)
-    definition_id: GraphId
+    type: Literal["call"] = dataclasses.field(default="call", init=False)
+    definition_id: ids.GraphId
     definition_module: str
     input: str
-    run_id: RunId
+    run_id: ids.RunId
     transitions_remaining: int
     output_dir: str
     call_path: str
     project_path: str
     started_at: float
-    checkpointing: CheckpointPolicy = CheckpointPolicy.OFF
+    checkpointing: _run_model.CheckpointPolicy = _run_model.CheckpointPolicy.OFF
     retry_incomplete: bool = False
-    params_override: str | None = None  # None omits the key; encoded None is a string.
+    params_override: str | None = (
+        None  # None omits the key; encoded None is a string.
+    )
     resume_continuation: str | None = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class EventFrame:
-    type: Literal["event"] = field(default="event", init=False)
+    type: Literal["event"] = dataclasses.field(default="event", init=False)
     kind: Literal["node", "edge"]
-    run_id: RunId
-    graph_id: GraphId
+    run_id: ids.RunId
+    graph_id: ids.GraphId
     entity_id: str
     status: EventStatus
     project_path: str
     transitions_remaining: int
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class TimingFrame:
-    type: Literal["timing"] = field(default="timing", init=False)
-    record: TimingRecord
+    type: Literal["timing"] = dataclasses.field(default="timing", init=False)
+    record: _statistics.TimingRecord
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class CheckpointFrame:
     """An opaque child continuation plus its user-facing boundary metadata."""
 
-    type: Literal["checkpoint"] = field(default="checkpoint", init=False)
-    run_id: RunId
+    type: Literal["checkpoint"] = dataclasses.field(
+        default="checkpoint", init=False
+    )
+    run_id: ids.RunId
     transitions_remaining: int
-    kind: CheckpointKind
-    completed: Boundary | None
-    next: Boundary | None
+    kind: _run_model.CheckpointKind
+    completed: _run_model.Boundary | None
+    next: _run_model.Boundary | None
     restore_available: bool
     session_branch_available: bool
     continuation: str | None
@@ -79,33 +87,39 @@ class CheckpointFrame:
     unavailable_reason: str | None = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class SuccessFrame(Generic[OutputT]):
-    """Carries an encoded string when sent and the decoded output when received."""
+    """Carries an encoded string when sent and decoded output when received."""
 
-    type: Literal["result"] = field(default="result", init=False)
-    outcome: Literal["success"] = field(default="success", init=False)
+    type: Literal["result"] = dataclasses.field(default="result", init=False)
+    outcome: Literal["success"] = dataclasses.field(
+        default="success", init=False
+    )
     output: OutputT
     transitions_remaining: int
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ErrorDetail:
     exception_type: str
     message: str
     traceback: str
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ErrorFrame:
-    type: Literal["result"] = field(default="result", init=False)
-    outcome: Literal["error"] = field(default="error", init=False)
+    type: Literal["result"] = dataclasses.field(default="result", init=False)
+    outcome: Literal["error"] = dataclasses.field(default="error", init=False)
     error: ErrorDetail
     transitions_remaining: int
 
 
 ReplyFrame: TypeAlias = (
-    EventFrame | TimingFrame | CheckpointFrame | SuccessFrame[object] | ErrorFrame
+    EventFrame
+    | TimingFrame
+    | CheckpointFrame
+    | SuccessFrame[object]
+    | ErrorFrame
 )
 TerminalFrame: TypeAlias = SuccessFrame[object] | ErrorFrame
 OutgoingFrame: TypeAlias = (
@@ -134,14 +148,14 @@ def decode_payload(value: object, /) -> object:
 
 
 def encode_binary_payload(value: bytes, /) -> str:
-    return encode_base64(value)
+    return _encoding.encode_base64(value)
 
 
 def decode_binary_payload(value: object, /) -> bytes:
     if not isinstance(value, str):
         raise ValueError("invalid child binary payload")
     try:
-        return decode_base64(value)
+        return _encoding.decode_base64(value)
     except ValueError as error:
         raise ValueError("invalid child binary payload") from error
 
@@ -161,21 +175,21 @@ def seconds(value: object, /) -> float:
 def wire_project_path(value: object, /) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("invalid child event project path")
-    path = PurePosixPath(value)
+    path = pathlib.PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
         raise ValueError("invalid child event project path")
     return value
 
 
 def encode_frame(frame: OutgoingFrame, /) -> bytes:
-    data: dict[str, object] = {"version": VERSION, **asdict(frame)}
+    data: dict[str, object] = {"version": VERSION, **dataclasses.asdict(frame)}
     if isinstance(frame, CallFrame) and frame.params_override is None:
         del data["params_override"]
     if isinstance(frame, CallFrame) and frame.resume_continuation is None:
         del data["resume_continuation"]
-    return (json.dumps(data, allow_nan=False, separators=(",", ":")) + "\n").encode(
-        "utf-8"
-    )
+    return (
+        json.dumps(data, allow_nan=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
 
 
 def decode_call(request: object, /) -> CallFrame:
@@ -198,7 +212,10 @@ def decode_call(request: object, /) -> CallFrame:
         or not definition_id
         or not isinstance(definition_module, str)
         or not definition_module
-        or any(not is_valid_entity_id(part) for part in definition_module.split("."))
+        or any(
+            not ids.is_valid_entity_id(part)
+            for part in definition_module.split(".")
+        )
         or not isinstance(run_id, str)
         or not run_id
         or type(remaining) is not int
@@ -211,7 +228,7 @@ def decode_call(request: object, /) -> CallFrame:
     ):
         raise ValueError("request fields are invalid")
     try:
-        checkpoint_policy = CheckpointPolicy(checkpointing)
+        checkpoint_policy = _run_model.CheckpointPolicy(checkpointing)
     except ValueError as error:
         raise ValueError("request fields are invalid") from error
     input_payload = frame.get("input")
@@ -227,10 +244,10 @@ def decode_call(request: object, /) -> CallFrame:
         resume_continuation = frame["resume_continuation"]
         decode_binary_payload(resume_continuation)
     return CallFrame(
-        definition_id=GraphId(definition_id),
+        definition_id=ids.GraphId(definition_id),
         definition_module=definition_module,
         input=input_payload,
-        run_id=RunId(run_id),
+        run_id=ids.RunId(run_id),
         transitions_remaining=remaining,
         output_dir=output_dir,
         call_path=call_path,
@@ -262,11 +279,13 @@ def _remaining(frame: dict[str, object], ceiling: int, /) -> int:
 
 def _event(
     frame: dict[str, object],
-    expected_run_id: RunId,
+    expected_run_id: ids.RunId,
     transitions_remaining: int,
     /,
 ) -> EventFrame:
-    if set(frame) != {item.name for item in fields(EventFrame)} | {"version"}:
+    if set(frame) != {item.name for item in dataclasses.fields(EventFrame)} | {
+        "version"
+    }:
         raise ValueError("invalid child event")
     kind = frame["kind"]
     run_id = frame["run_id"]
@@ -288,8 +307,8 @@ def _event(
         raise ValueError("invalid child event")
     return EventFrame(
         kind=cast(Literal["node", "edge"], kind),
-        run_id=RunId(run_id),
-        graph_id=GraphId(graph_id),
+        run_id=ids.RunId(run_id),
+        graph_id=ids.GraphId(graph_id),
         entity_id=entity_id,
         status=cast(EventStatus, status),
         project_path=wire_project_path(frame["project_path"]),
@@ -298,36 +317,40 @@ def _event(
 
 
 def _timing(
-    frame: dict[str, object], call_path: Path, project_path: str, /
+    frame: dict[str, object], call_path: pathlib.Path, project_path: str, /
 ) -> TimingFrame:
-    if set(frame) != {item.name for item in fields(TimingFrame)} | {"version"}:
+    if set(frame) != {item.name for item in dataclasses.fields(TimingFrame)} | {
+        "version"
+    }:
         raise ValueError("invalid child timing frame")
     value = frame["record"]
     if not isinstance(value, dict):
         raise ValueError("invalid child timing record")
     data = cast(dict[str, object], value)
-    if set(data) != {item.name for item in fields(TimingRecord)}:
+    if set(data) != {
+        item.name for item in dataclasses.fields(_statistics.TimingRecord)
+    }:
         raise ValueError("invalid child timing record")
     for name in ("path", "project_path", "graph_id", "node_id", "node_type"):
         if not isinstance(data[name], str) or not data[name]:
             raise ValueError("invalid child timing identity")
-    if data["status"] not in get_args(TimingStatus):
+    if data["status"] not in get_args(_statistics.TimingStatus):
         raise ValueError("invalid child timing status")
-    record = TimingRecord(
+    record = _statistics.TimingRecord(
         path=wire_project_path(data["path"]),
         project_path=wire_project_path(data["project_path"]),
         graph_id=cast(str, data["graph_id"]),
         node_id=cast(str, data["node_id"]),
         node_type=cast(str, data["node_type"]),
-        status=cast(TimingStatus, data["status"]),
+        status=cast(_statistics.TimingStatus, data["status"]),
         duration_seconds=seconds(data["duration_seconds"]),
     )
-    if not PurePosixPath(record.path).is_relative_to(
-        PurePosixPath(call_path.as_posix())
+    if not pathlib.PurePosixPath(record.path).is_relative_to(
+        pathlib.PurePosixPath(call_path.as_posix())
     ):
         raise ValueError("child timing path escapes its call")
-    if not PurePosixPath(record.project_path).is_relative_to(
-        PurePosixPath(project_path)
+    if not pathlib.PurePosixPath(record.project_path).is_relative_to(
+        pathlib.PurePosixPath(project_path)
     ):
         raise ValueError("child timing project path escapes its owner")
     return TimingFrame(record=record)
@@ -337,7 +360,7 @@ def _error_detail(value: object, /) -> ErrorDetail:
     if not isinstance(value, dict):
         raise ValueError("invalid child error")
     error = cast(dict[str, object], value)
-    if set(error) != {item.name for item in fields(ErrorDetail)}:
+    if set(error) != {item.name for item in dataclasses.fields(ErrorDetail)}:
         raise ValueError("invalid child error")
     exception_type = error["exception_type"]
     message = error["message"]
@@ -355,8 +378,12 @@ def _error_detail(value: object, /) -> ErrorDetail:
     )
 
 
-def _success(frame: dict[str, object], remaining: int, /) -> SuccessFrame[object]:
-    if set(frame) != {item.name for item in fields(SuccessFrame)} | {"version"}:
+def _success(
+    frame: dict[str, object], remaining: int, /
+) -> SuccessFrame[object]:
+    if set(frame) != {
+        item.name for item in dataclasses.fields(SuccessFrame)
+    } | {"version"}:
         raise ValueError("invalid child result")
     return SuccessFrame(
         output=decode_payload(frame["output"]), transitions_remaining=remaining
@@ -364,7 +391,9 @@ def _success(frame: dict[str, object], remaining: int, /) -> SuccessFrame[object
 
 
 def _error(frame: dict[str, object], remaining: int, /) -> ErrorFrame:
-    if set(frame) != {item.name for item in fields(ErrorFrame)} | {"version"}:
+    if set(frame) != {item.name for item in dataclasses.fields(ErrorFrame)} | {
+        "version"
+    }:
         raise ValueError("invalid child result")
     return ErrorFrame(
         error=_error_detail(frame["error"]), transitions_remaining=remaining
@@ -372,21 +401,25 @@ def _error(frame: dict[str, object], remaining: int, /) -> ErrorFrame:
 
 
 def _checkpoint_boundary(
-    value: object, project_path: str, call_path: Path, /
-) -> Boundary | None:
+    value: object, project_path: str, call_path: pathlib.Path, /
+) -> _run_model.Boundary | None:
     if value is None:
         return None
     if not isinstance(value, dict):
         raise ValueError("invalid child checkpoint boundary")
     boundary = cast(dict[str, object], value)
-    if set(boundary) != {item.name for item in fields(Boundary)}:
+    if set(boundary) != {
+        item.name for item in dataclasses.fields(_run_model.Boundary)
+    }:
         raise ValueError("invalid child checkpoint boundary")
     boundary_project = wire_project_path(boundary["project_path"])
     boundary_call = wire_project_path(boundary["call_path"])
-    if not PurePosixPath(boundary_project).is_relative_to(PurePosixPath(project_path)):
+    if not pathlib.PurePosixPath(boundary_project).is_relative_to(
+        pathlib.PurePosixPath(project_path)
+    ):
         raise ValueError("child checkpoint project path escapes its owner")
-    if not PurePosixPath(boundary_call).is_relative_to(
-        PurePosixPath(call_path.as_posix())
+    if not pathlib.PurePosixPath(boundary_call).is_relative_to(
+        pathlib.PurePosixPath(call_path.as_posix())
     ):
         raise ValueError("child checkpoint path escapes its call")
     graph = boundary["graph"]
@@ -401,7 +434,7 @@ def _checkpoint_boundary(
         or visit <= 0
     ):
         raise ValueError("invalid child checkpoint boundary")
-    return Boundary(
+    return _run_model.Boundary(
         project_path=boundary_project,
         graph=graph,
         node=node,
@@ -412,13 +445,15 @@ def _checkpoint_boundary(
 
 def _checkpoint(
     frame: dict[str, object],
-    expected_run_id: RunId,
+    expected_run_id: ids.RunId,
     transitions_remaining: int,
-    call_path: Path,
+    call_path: pathlib.Path,
     project_path: str,
     /,
 ) -> CheckpointFrame:
-    if set(frame) != {item.name for item in fields(CheckpointFrame)} | {"version"}:
+    if set(frame) != {
+        item.name for item in dataclasses.fields(CheckpointFrame)
+    } | {"version"}:
         raise ValueError("invalid child checkpoint")
     run_id = frame["run_id"]
     kind = frame["kind"]
@@ -434,27 +469,42 @@ def _checkpoint(
         or not isinstance(kind, str)
         or not isinstance(restore_available, bool)
         or not isinstance(branch_available, bool)
-        or (unavailable_code is not None and not isinstance(unavailable_code, str))
-        or (unavailable_reason is not None and not isinstance(unavailable_reason, str))
+        or (
+            unavailable_code is not None
+            and not isinstance(unavailable_code, str)
+        )
+        or (
+            unavailable_reason is not None
+            and not isinstance(unavailable_reason, str)
+        )
     ):
         raise ValueError("invalid child checkpoint")
     try:
-        checkpoint_kind = CheckpointKind(kind)
+        checkpoint_kind = _run_model.CheckpointKind(kind)
     except ValueError as error:
         raise ValueError("invalid child checkpoint") from error
     if restore_available:
         decode_binary_payload(continuation)
-        if decode_artifact_references(artifact_references, Path("child checkpoint")) is None:
-            raise ValueError("restorable child checkpoint has no artifact references")
+        if (
+            _artifact_references.decode_artifact_references(
+                artifact_references, pathlib.Path("child checkpoint")
+            )
+            is None
+        ):
+            raise ValueError(
+                "restorable child checkpoint has no artifact references"
+            )
         if unavailable_code is not None or unavailable_reason is not None:
             raise ValueError("invalid child checkpoint")
     elif continuation is not None or artifact_references is not None:
         raise ValueError("invalid child checkpoint")
     return CheckpointFrame(
-        run_id=RunId(run_id),
+        run_id=ids.RunId(run_id),
         transitions_remaining=_remaining(frame, transitions_remaining),
         kind=checkpoint_kind,
-        completed=_checkpoint_boundary(frame["completed"], project_path, call_path),
+        completed=_checkpoint_boundary(
+            frame["completed"], project_path, call_path
+        ),
         next=_checkpoint_boundary(frame["next"], project_path, call_path),
         restore_available=restore_available,
         session_branch_available=branch_available,
@@ -469,9 +519,9 @@ def decode_reply(
     raw: bytes,
     /,
     *,
-    run_id: RunId,
+    run_id: ids.RunId,
     transitions_remaining: int,
-    call_path: Path,
+    call_path: pathlib.Path,
     project_path: str,
 ) -> ReplyFrame:
     frame = _decoded_frame(raw)

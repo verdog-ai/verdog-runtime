@@ -1,6 +1,6 @@
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-import re
 from typing import override
 from urllib.parse import unquote
 
@@ -24,7 +24,9 @@ def _table_rows(tmp_path: Path) -> list[tuple[str, ...]]:
     ]
 
 
-def test_configuration_flattens_fields_defaults_and_escapes_cells(tmp_path: Path) -> None:
+def test_configuration_flattens_fields_defaults_and_escapes_cells(
+    tmp_path: Path,
+) -> None:
     @dataclass(frozen=True)
     class Search:
         width: int = 8
@@ -159,16 +161,23 @@ def test_invocation_reports_link_direct_calls_in_observed_order(
         reports(_enter(graph))
     reports(_enter(first))
 
-    expected = [tmp_path / scope(graph) / "config.md" for graph in (first, second, repeated)]
+    expected = [
+        tmp_path / scope(graph) / "config.md"
+        for graph in (first, second, repeated)
+    ]
     assert _links(tmp_path / "config.md") == expected
     assert _links(tmp_path / scope(first) / "config.md") == [
         tmp_path / scope(grandchild) / "config.md"
     ]
     assert (tmp_path / "config.md").read_text("utf-8").count("## Calls") == 1
-    assert "## Calls" not in (tmp_path / scope(repeated) / "config.md").read_text("utf-8")
+    assert "## Calls" not in (
+        tmp_path / scope(repeated) / "config.md"
+    ).read_text("utf-8")
 
     for graph in graphs:
-        (tmp_path / scope(graph) / "stats.md").write_text("# Statistics\n", "utf-8")
+        (tmp_path / scope(graph) / "stats.md").write_text(
+            "# Statistics\n", "utf-8"
+        )
     reports.finish()
     assert _links(tmp_path / "stats.md") == [
         path.with_name("stats.md") for path in expected
@@ -204,12 +213,18 @@ def test_invocation_reports_escape_links_and_skip_missing_reports(
     assert r"\[child\]\*\`\\&#124;<br>name" in report
 
     child_without_stats = child / "unfinished" / "000001" / wrapper
-    unfinished = tmp_path / (child_without_stats.parent if legacy else child_without_stats)
+    unfinished = tmp_path / (
+        child_without_stats.parent if legacy else child_without_stats
+    )
     unfinished.mkdir(parents=True)
     write_configuration(unfinished, ())
     if not legacy:
         register_invocation(
-            tmp_path, child_without_stats, child, child_without_stats, None,
+            tmp_path,
+            child_without_stats,
+            child,
+            child_without_stats,
+            None,
             parent_report=child,
         )
     reports(_enter(child_without_stats))

@@ -2,56 +2,52 @@
 
 from __future__ import annotations
 
+import dataclasses
+import datetime
 import json
 import os
+import pathlib
 import sys
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Literal, cast
 
-from tabulate import tabulate
-from .._run_model import RUN_HISTORY_SCHEMA_VERSION
-from .._run_store import (
-    CONTROL_DIRECTORY,
-    RUN_MANIFEST,
-    CheckpointSummary,
-    RunManifest,
-    RunStatus,
-    RunStore,
-    RunStoreError,
-    registered_runs,
-    run_is_active,
-)
+import tabulate
 
-from .local import Clone, WorkspaceError
-from .runner import LifecycleRequest, operate
+from verdog_runtime import _run_model, _run_store
+from verdog_runtime.cli import local, runner
 
 
-class RunCommandError(WorkspaceError):
+class RunCommandError(local.WorkspaceError):
     """A run selection or metadata failure with a stable machine code."""
 
-    def __init__(self, message: str, *, code: str, details: object = None) -> None:
+    def __init__(
+        self, message: str, *, code: str, details: object = None
+    ) -> None:
+        """Retain an error code and optional structured diagnostic details."""
         super().__init__(message)
         self.code = code
         self.details = details
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class RunRecord:
-    manifest: RunManifest
-    output_dir: Path
-    status: RunStatus
-    checkpoints: tuple[CheckpointSummary, ...]
+    """A durable run manifest with its resolved status and checkpoints."""
+
+    manifest: _run_store.RunManifest
+    output_dir: pathlib.Path
+    status: _run_store.RunStatus
+    checkpoints: tuple[_run_store.CheckpointSummary, ...]
 
     def as_summary(self) -> dict[str, object]:
+        """Return the manifest summary using the resolved run status."""
         return self.manifest.as_summary(status=self.status)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class DiscoveryIssue:
-    path: Path
+    """A metadata error encountered while inspecting a candidate run."""
+
+    path: pathlib.Path
     code: str
     message: str
     details: object = None
@@ -59,13 +55,17 @@ class DiscoveryIssue:
     directory_name: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class RunDiscovery:
+    """Valid runs and diagnostic issues found during local discovery."""
+
     runs: tuple[RunRecord, ...]
     issues: tuple[DiscoveryIssue, ...]
 
 
-def _issue(path: Path, error: RunStoreError) -> DiscoveryIssue:
+def _issue(
+    path: pathlib.Path, error: _run_store.RunStoreError
+) -> DiscoveryIssue:
     raw_details: object = error.details
     details = (
         cast(dict[str, object], raw_details)
@@ -86,16 +86,19 @@ def _issue(path: Path, error: RunStoreError) -> DiscoveryIssue:
     )
 
 
-def _default_outputs(project_root: Path) -> tuple[Path, ...]:
+def _default_outputs(project_root: pathlib.Path) -> tuple[pathlib.Path, ...]:
     root = project_root.resolve() / ".verdog" / "runs"
     if not root.is_dir() or root.is_symlink():
         return ()
-    outputs: list[Path] = []
+    outputs: list[pathlib.Path] = []
     for directory, children, _ in os.walk(root):
-        path = Path(directory)
-        if (path / CONTROL_DIRECTORY / RUN_MANIFEST).exists():
+        path = pathlib.Path(directory)
+        if (
+            path / _run_store.CONTROL_DIRECTORY / _run_store.RUN_MANIFEST
+        ).exists():
             outputs.append(path.resolve())
-            # A run's artifacts may be large and may contain copied run metadata.
+            # A run's artifacts may be large and may contain copied run
+            # metadata.
             children.clear()
         else:
             children[:] = [
@@ -107,21 +110,25 @@ def _default_outputs(project_root: Path) -> tuple[Path, ...]:
 
 
 def _registered_outputs(
-    project_root: Path,
-) -> tuple[tuple[Path, ...], DiscoveryIssue | None]:
+    project_root: pathlib.Path,
+) -> tuple[tuple[pathlib.Path, ...], DiscoveryIssue | None]:
     try:
-        return registered_runs(project_root), None
-    except RunStoreError as error:
-        return (), _issue(project_root.resolve() / ".verdog/run-registry.json", error)
+        return _run_store.registered_runs(project_root), None
+    except _run_store.RunStoreError as error:
+        return (), _issue(
+            project_root.resolve() / ".verdog/run-registry.json", error
+        )
 
 
-def _load_record(project_root: Path, output_dir: Path, /) -> RunRecord:
+def _load_record(
+    project_root: pathlib.Path, output_dir: pathlib.Path, /
+) -> RunRecord:
     project = project_root.resolve()
     output = output_dir.resolve()
-    store = RunStore(output)
+    store = _run_store.RunStore(output)
     manifest = store.manifest()
-    if Path(manifest.project_root).resolve() != project:
-        raise RunStoreError(
+    if pathlib.Path(manifest.project_root).resolve() != project:
+        raise _run_store.RunStoreError(
             f"run belongs to another project: {output}",
             code="run.project_mismatch",
             details={
@@ -130,25 +137,26 @@ def _load_record(project_root: Path, output_dir: Path, /) -> RunRecord:
             },
         )
     status = manifest.status
-    if status is RunStatus.RUNNING and not run_is_active(output):
-        status = RunStatus.INTERRUPTED
+    if status is _run_store.RunStatus.RUNNING and not _run_store.run_is_active(
+        output
+    ):
+        status = _run_store.RunStatus.INTERRUPTED
     return RunRecord(manifest, output, status, store.checkpoints())
 
 
-def _updated_sort_key(value: str, /) -> tuple[int, datetime, str]:
+def _updated_sort_key(value: str, /) -> tuple[int, datetime.datetime, str]:
     try:
         normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-        instant = datetime.fromisoformat(normalized)
+        instant = datetime.datetime.fromisoformat(normalized)
         if instant.tzinfo is None:
-            instant = instant.replace(tzinfo=UTC)
+            instant = instant.replace(tzinfo=datetime.UTC)
     except ValueError:
-        return 0, datetime.min.replace(tzinfo=UTC), value
-    return 1, instant.astimezone(UTC), value
+        return 0, datetime.datetime.min.replace(tzinfo=datetime.UTC), value
+    return 1, instant.astimezone(datetime.UTC), value
 
 
-def discover_runs(project_root: Path) -> RunDiscovery:
-    """Find default and registered custom outputs without importing workflows."""
-
+def discover_runs(project_root: pathlib.Path) -> RunDiscovery:
+    """Find local runs without importing their workflow code."""
     project = project_root.resolve()
     registered, registry_issue = _registered_outputs(project)
     candidates = {*_default_outputs(project), *registered}
@@ -157,16 +165,19 @@ def discover_runs(project_root: Path) -> RunDiscovery:
     for output in sorted(candidates, key=str):
         try:
             found.append(_load_record(project, output))
-        except RunStoreError as error:
+        except _run_store.RunStoreError as error:
             issues.append(_issue(output, error))
     found.sort(
-        key=lambda run: (*_updated_sort_key(run.manifest.updated_at), run.manifest.id),
+        key=lambda run: (
+            *_updated_sort_key(run.manifest.updated_at),
+            run.manifest.id,
+        ),
         reverse=True,
     )
     return RunDiscovery(tuple(found), tuple(issues))
 
 
-def _workflow_matches(manifest: RunManifest, requested: str) -> bool:
+def _workflow_matches(manifest: _run_store.RunManifest, requested: str) -> bool:
     identifiers = {
         manifest.workflow.id,
         manifest.workflow.definition_id,
@@ -180,8 +191,9 @@ def filtered_runs(
     discovery: RunDiscovery,
     *,
     workflow: str | None = None,
-    statuses: Iterable[RunStatus] = (),
+    statuses: Iterable[_run_store.RunStatus] = (),
 ) -> tuple[RunRecord, ...]:
+    """Filter discovered runs by workflow and execution status."""
     selected_statuses = frozenset(statuses)
     return tuple(
         run
@@ -200,19 +212,19 @@ def _path_reference(reference: str) -> bool:
 
 
 def _record_from_path(
-    project_root: Path,
+    project_root: pathlib.Path,
     reference: str,
-    start: Path,
+    start: pathlib.Path,
     known: Sequence[RunRecord],
 ) -> RunRecord:
-    raw = Path(reference).expanduser()
+    raw = pathlib.Path(reference).expanduser()
     output = (start / raw).resolve() if not raw.is_absolute() else raw.resolve()
     existing = next((run for run in known if run.output_dir == output), None)
     if existing is not None:
         return existing
     try:
         return _load_record(project_root, output)
-    except RunStoreError as error:
+    except _run_store.RunStoreError as error:
         raise RunCommandError(
             str(error), code=error.code, details=error.details
         ) from error
@@ -227,17 +239,16 @@ def _issue_matches(issue: DiscoveryIssue, reference: str) -> bool:
 
 
 def select_run(
-    project_root: Path,
+    project_root: pathlib.Path,
     reference: str | None,
     *,
-    start: Path | None = None,
+    start: pathlib.Path | None = None,
 ) -> tuple[RunRecord, RunDiscovery]:
     """Resolve a path, UUID/prefix, or managed directory basename."""
-
     discovery = discover_runs(project_root)
     if reference is not None and _path_reference(reference):
         return _record_from_path(
-            project_root, reference, start or Path.cwd(), discovery.runs
+            project_root, reference, start or pathlib.Path.cwd(), discovery.runs
         ), discovery
     matches = discovery.runs
     if reference is not None:
@@ -327,7 +338,9 @@ def _issue_details(issues: Sequence[DiscoveryIssue]) -> list[dict[str, str]]:
 
 def _table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
     return str(
-        tabulate(rows, headers=headers, tablefmt="simple", disable_numparse=True)
+        tabulate.tabulate(
+            rows, headers=headers, tablefmt="simple", disable_numparse=True
+        )
     )
 
 
@@ -355,24 +368,25 @@ def _runs_human(runs: Sequence[RunRecord]) -> str:
 
 
 def list_runs(
-    clone: Clone,
+    clone: local.Clone,
     *,
     workflow: str | None = None,
     statuses: Sequence[str] = (),
     as_json: bool = False,
 ) -> int:
+    """Print matching runs as a compact table or machine-readable JSON."""
     discovery = discover_runs(clone.root)
     selected = filtered_runs(
         discovery,
         workflow=workflow,
-        statuses=tuple(RunStatus(status) for status in statuses),
+        statuses=tuple(_run_store.RunStatus(status) for status in statuses),
     )
     _warn(discovery.issues)
     if as_json:
         print(
             json.dumps(
                 {
-                    "schema_version": RUN_HISTORY_SCHEMA_VERSION,
+                    "schema_version": _run_model.RUN_HISTORY_SCHEMA_VERSION,
                     "operation": "runs",
                     "project": str(clone.root.resolve()),
                     "runs": [run.as_summary() for run in selected],
@@ -397,7 +411,9 @@ def _boundary_label(value: object) -> str:
     return f"{prefix}{graph}/{node}#{visit}"
 
 
-def _checkpoints_human(run: RunRecord, checkpoints: Sequence[CheckpointSummary]) -> str:
+def _checkpoints_human(
+    run: RunRecord, checkpoints: Sequence[_run_store.CheckpointSummary]
+) -> str:
     heading = f"Run {run.manifest.id} ({run.status.value}) — {run.output_dir}"
     if not checkpoints:
         return heading + "\n\nNo checkpoints found."
@@ -417,19 +433,28 @@ def _checkpoints_human(run: RunRecord, checkpoints: Sequence[CheckpointSummary])
         heading
         + "\n\n"
         + _table(
-            ("CHECKPOINT", "KIND", "COMPLETED", "NEXT", "RESTORE", "BRANCH", "CREATED"),
+            (
+                "CHECKPOINT",
+                "KIND",
+                "COMPLETED",
+                "NEXT",
+                "RESTORE",
+                "BRANCH",
+                "CREATED",
+            ),
             rows,
         )
     )
 
 
 def list_checkpoints(
-    clone: Clone,
+    clone: local.Clone,
     *,
     reference: str | None = None,
     as_json: bool = False,
-    start: Path | None = None,
+    start: pathlib.Path | None = None,
 ) -> int:
+    """Print the selected run's checkpoints as a table or JSON."""
     run, discovery = select_run(clone.root, reference, start=start)
     _warn(discovery.issues)
     checkpoints = run.checkpoints
@@ -437,7 +462,7 @@ def list_checkpoints(
         print(
             json.dumps(
                 {
-                    "schema_version": RUN_HISTORY_SCHEMA_VERSION,
+                    "schema_version": _run_model.RUN_HISTORY_SCHEMA_VERSION,
                     "operation": "checkpoints",
                     "run": run.as_summary(),
                     "checkpoints": [item.as_summary() for item in checkpoints],
@@ -455,19 +480,26 @@ def _workflow_local_id(run: RunRecord) -> str:
 
 
 def _require_inactive(run: RunRecord) -> None:
-    if run_is_active(run.output_dir):
+    if _run_store.run_is_active(run.output_dir):
         raise RunCommandError(
             f"run is active: {run.manifest.id}",
             code="run.active",
-            details={"run_id": run.manifest.id, "output_dir": str(run.output_dir)},
+            details={
+                "run_id": run.manifest.id,
+                "output_dir": str(run.output_dir),
+            },
         )
 
 
-def _run_checkpoints(run: RunRecord, /) -> tuple[CheckpointSummary, ...]:
+def _run_checkpoints(
+    run: RunRecord, /
+) -> tuple[_run_store.CheckpointSummary, ...]:
     return run.checkpoints
 
 
-def _checkpoint_by_sequence(run: RunRecord, sequence: int) -> CheckpointSummary:
+def _checkpoint_by_sequence(
+    run: RunRecord, sequence: int
+) -> _run_store.CheckpointSummary:
     found = next(
         (
             checkpoint
@@ -486,20 +518,20 @@ def _checkpoint_by_sequence(run: RunRecord, sequence: int) -> CheckpointSummary:
 
 
 def resume_run(
-    clone: Clone,
+    clone: local.Clone,
     *,
     reference: str | None,
     retry_incomplete: bool = False,
     as_json: bool = False,
 ) -> int:
     """Resume the selected run at its latest exactly committed boundary."""
-
     run, discovery = select_run(clone.root, reference)
     _warn(discovery.issues)
     _require_inactive(run)
-    if run.status is RunStatus.SUCCEEDED:
+    if run.status is _run_store.RunStatus.SUCCEEDED:
         raise RunCommandError(
-            "a succeeded run cannot be resumed; fork a checkpoint or restart it",
+            "a succeeded run cannot be resumed; fork a "
+            "checkpoint or restart it",
             code="run.already_succeeded",
             details={"run_id": run.manifest.id},
         )
@@ -519,9 +551,9 @@ def resume_run(
             code="session.branch_unavailable",
             details={"run_id": run.manifest.id, "checkpoint": checkpoint},
         )
-    return operate(
+    return runner.operate(
         clone,
-        LifecycleRequest(
+        runner.LifecycleRequest(
             operation="resume",
             source=run.output_dir,
             workflow_id=_workflow_local_id(run),
@@ -536,7 +568,7 @@ def resume_run(
 
 
 def restart_run(
-    clone: Clone,
+    clone: local.Clone,
     *,
     reference: str | None,
     sessions: str,
@@ -544,13 +576,13 @@ def restart_run(
     as_json: bool = False,
 ) -> int:
     """Start a new lineage child from the beginning of a prior launch."""
-
     run, discovery = select_run(clone.root, reference)
     _warn(discovery.issues)
     _require_inactive(run)
     if sessions not in {"branch", "fresh"}:
         raise RunCommandError(
-            f"unsupported session policy: {sessions}", code="session.policy_invalid"
+            f"unsupported session policy: {sessions}",
+            code="session.policy_invalid",
         )
     session_policy: Literal["branch", "fresh"] = (
         "branch" if sessions == "branch" else "fresh"
@@ -567,17 +599,20 @@ def restart_run(
         )
         if summary is None:
             raise RunCommandError(
-                "this run has no checkpoint from which conversations can branch",
+                "this run has no checkpoint from which "
+                "conversations can branch",
                 code="session.branch_unavailable",
                 details={"run_id": run.manifest.id},
             )
         checkpoint = summary.sequence
     selected_arguments = (
-        run.manifest.launch.workflow_arguments if arguments is None else arguments
+        run.manifest.launch.workflow_arguments
+        if arguments is None
+        else arguments
     )
-    return operate(
+    return runner.operate(
         clone,
-        LifecycleRequest(
+        runner.LifecycleRequest(
             operation="restart",
             source=run.output_dir,
             workflow_id=_workflow_local_id(run),
@@ -591,7 +626,7 @@ def restart_run(
 
 
 def fork_run(
-    clone: Clone,
+    clone: local.Clone,
     *,
     reference: str | None,
     checkpoint: int,
@@ -599,13 +634,13 @@ def fork_run(
     as_json: bool = False,
 ) -> int:
     """Continue a committed workflow state in a new lineage child."""
-
     run, discovery = select_run(clone.root, reference)
     _warn(discovery.issues)
     _require_inactive(run)
     if sessions not in {"branch", "fresh"}:
         raise RunCommandError(
-            f"unsupported session policy: {sessions}", code="session.policy_invalid"
+            f"unsupported session policy: {sessions}",
+            code="session.policy_invalid",
         )
     session_policy: Literal["branch", "fresh"] = (
         "branch" if sessions == "branch" else "fresh"
@@ -619,7 +654,9 @@ def fork_run(
     if not available:
         raise RunCommandError(
             summary.unavailable_reason
-            or f"checkpoint {checkpoint} cannot be forked with {sessions} sessions",
+            or f"checkpoint "
+            f"{checkpoint} cannot be forked with "
+            f"{sessions} sessions",
             code=summary.unavailable_code or "checkpoint.fork_unavailable",
             details={
                 "run_id": run.manifest.id,
@@ -627,9 +664,9 @@ def fork_run(
                 "sessions": sessions,
             },
         )
-    return operate(
+    return runner.operate(
         clone,
-        LifecycleRequest(
+        runner.LifecycleRequest(
             operation="fork",
             source=run.output_dir,
             workflow_id=_workflow_local_id(run),

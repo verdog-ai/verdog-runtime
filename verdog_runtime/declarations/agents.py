@@ -1,48 +1,56 @@
+"""Agent requests, results, and provider session capabilities."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import StrEnum
-from pathlib import Path
+import dataclasses
+import enum
+import pathlib
 from typing import Protocol
 
-from ..cancellation import CancellationToken
-from .context import AgentAccess, NodeContext
-from .ids import (
-    AgentProfileId,
-    AgentSessionId,
-    ProviderSessionId,
-)
+from verdog_runtime import cancellation as cancellation_module
+from verdog_runtime.declarations import context as contexts
+from verdog_runtime.declarations import ids
 
 
-class AgentSessionAction(StrEnum):
+class AgentSessionAction(enum.StrEnum):
+    """Whether a provider resumes a session or branches from latest reply."""
+
     CONTINUE = "continue"
     FORK = "fork"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class AgentSessionCapabilities:
+    """Session operations supported by an agent provider."""
+
     fork_latest: bool = False
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class AgentRequest:
+    """One invocation with workspace, access mode, session, and cancellation."""
+
     prompt: str
-    profile_id: AgentProfileId
-    session_id: AgentSessionId
+    profile_id: ids.AgentProfileId
+    session_id: ids.AgentSessionId
     persistent: bool
-    provider_session_id: ProviderSessionId | None
-    node_context: NodeContext[object]
-    workspace: Path
-    access: AgentAccess
-    artifact_dir: Path
+    provider_session_id: ids.ProviderSessionId | None
+    node_context: contexts.NodeContext[object]
+    workspace: pathlib.Path
+    access: contexts.AgentAccess
+    artifact_dir: pathlib.Path
     provider_session_action: AgentSessionAction = AgentSessionAction.CONTINUE
-    cancellation: CancellationToken = field(default_factory=CancellationToken)
+    cancellation: cancellation_module.CancellationToken = dataclasses.field(
+        default_factory=cancellation_module.CancellationToken
+    )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class AgentReply:
+    """Provider response text and the session identifier available for reuse."""
+
     text: str
-    provider_session_id: ProviderSessionId | None = None
+    provider_session_id: ids.ProviderSessionId | None = None
 
 
 class AgentInvocationError(RuntimeError):
@@ -50,12 +58,22 @@ class AgentInvocationError(RuntimeError):
 
 
 class AgentInvoker(Protocol):
-    @property
-    def session_provider(self) -> str: ...
+    """A synchronous provider returning a reply or an invocation error."""
 
-    def __call__(self, request: AgentRequest, /) -> AgentReply: ...
+    @property
+    def session_provider(self) -> str:
+        """The stable provider name used to identify stored sessions."""
+        ...
+
+    def __call__(self, request: AgentRequest, /) -> AgentReply:
+        """Run the request and return response text with an session ID."""
+        ...
 
 
 class ForkingAgentInvoker(AgentInvoker, Protocol):
+    """An agent provider that declares its session branching capabilities."""
+
     @property
-    def session_capabilities(self) -> AgentSessionCapabilities: ...
+    def session_capabilities(self) -> AgentSessionCapabilities:
+        """The supported session operations for this provider."""
+        ...

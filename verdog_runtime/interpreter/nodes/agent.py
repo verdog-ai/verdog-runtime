@@ -1,13 +1,13 @@
+"""Execute agent visits with provider and session resources."""
+
 from __future__ import annotations
 
-from pathlib import Path
+import pathlib
 from typing import TypeVar, cast
 
-from ...cancellation import CancellationToken
-from ...agents import AgentInvocationError, AgentInvoker, AgentReply, AgentRequest
-from ...declarations import Agent, AgentAccess, AgentNodeContext, NodeContext
-from .._agents import Resources
-from . import Visit
+from verdog_runtime import agents, declarations
+from verdog_runtime import cancellation as cancellation_module
+from verdog_runtime.interpreter import _agents, nodes
 
 InputT = TypeVar("InputT")
 StateT = TypeVar("StateT")
@@ -16,22 +16,27 @@ ResultT = TypeVar("ResultT")
 
 
 def execute(
-    operation: Agent,
-    implementation: Visit[InputT, StateT, AgentNodeContext[ParamsT], ResultT],
+    operation: declarations.Agent,
+    implementation: nodes.Visit[
+        InputT, StateT, declarations.AgentNodeContext[ParamsT], ResultT
+    ],
     value: InputT,
     state: StateT,
-    context: NodeContext[ParamsT],
-    resources: Resources,
-    cancellation: CancellationToken,
+    context: declarations.NodeContext[ParamsT],
+    resources: _agents.Resources,
+    cancellation: cancellation_module.CancellationToken,
     /,
 ) -> ResultT:
+    """Invoke an agent visit with the resolved profile and session context."""
     return implementation(
-        value, state, _agent_context(operation, context, resources, cancellation)
+        value,
+        state,
+        _agent_context(operation, context, resources, cancellation),
     )
 
 
-def _agent_reply(value: object, /) -> AgentReply:
-    if not isinstance(value, AgentReply):
+def _agent_reply(value: object, /) -> agents.AgentReply:
+    if not isinstance(value, agents.AgentReply):
         raise TypeError("agent invoker did not return AgentReply")
     text = cast(object, value.text)
     if not isinstance(text, str):
@@ -40,18 +45,20 @@ def _agent_reply(value: object, /) -> AgentReply:
     if provider_session_id is not None and (
         not isinstance(provider_session_id, str) or not provider_session_id
     ):
-        raise TypeError("agent reply provider session id must be a non-empty string")
+        raise TypeError(
+            "agent reply provider session id must be a non-empty string"
+        )
     return value
 
 
 def _invoke_with_recovery(
-    profile: AgentInvoker,
-    request: AgentRequest,
+    profile: agents.AgentInvoker,
+    request: agents.AgentRequest,
     provider: str,
-    resources: Resources,
+    resources: _agents.Resources,
     slot: int,
     /,
-) -> AgentReply:
+) -> agents.AgentReply:
     journal = resources.invocation_journal
     if journal is None:
         return _agent_reply(profile(request))
@@ -71,33 +78,33 @@ def _invoke_with_recovery(
 
 
 def _agent_context(
-    operation: Agent,
-    context: NodeContext[ParamsT],
-    resources: Resources,
-    cancellation: CancellationToken,
+    operation: declarations.Agent,
+    context: declarations.NodeContext[ParamsT],
+    resources: _agents.Resources,
+    cancellation: cancellation_module.CancellationToken,
     /,
-) -> AgentNodeContext[ParamsT]:
+) -> declarations.AgentNodeContext[ParamsT]:
     invocation_count = 0
 
     def invoke_agent(prompt: object, workspace: object, access: object) -> str:
         nonlocal invocation_count
         if not isinstance(prompt, str):
             raise TypeError("agent prompt must be a string")
-        if not isinstance(workspace, Path):
+        if not isinstance(workspace, pathlib.Path):
             raise TypeError("agent workspace must be a Path")
-        if not isinstance(access, AgentAccess):
+        if not isinstance(access, declarations.AgentAccess):
             raise TypeError("agent access must be AgentAccess")
         resolved_workspace = workspace.resolve()
         if not resolved_workspace.is_dir():
             raise ValueError("agent workspace must be an existing directory")
         profile = resources.profiles.get(operation.profile)
         if profile is None:
-            raise AgentInvocationError(
+            raise agents.AgentInvocationError(
                 f"agent profile resource is unavailable: {operation.profile}"
             )
         session = resources.sessions.get(operation.session)
         if session is None:
-            raise AgentInvocationError(
+            raise agents.AgentInvocationError(
                 f"agent session resource is unavailable: {operation.session}"
             )
         provider = profile.session_provider
@@ -105,16 +112,18 @@ def _agent_context(
             operation.session, profile, access
         )
         invocation_count += 1
-        artifact_dir = context.output_dir / "invocations" / f"{invocation_count:06d}"
+        artifact_dir = (
+            context.output_dir / "invocations" / f"{invocation_count:06d}"
+        )
         artifact_dir.mkdir(parents=True, exist_ok=False)
         (artifact_dir / "prompt.txt").write_text(prompt, "utf-8")
-        request = AgentRequest(
+        request = agents.AgentRequest(
             prompt=prompt,
             profile_id=operation.profile,
             session_id=operation.session,
             persistent=session.persistent,
             provider_session_id=provider_session_id,
-            node_context=cast(NodeContext[object], context),
+            node_context=cast(declarations.NodeContext[object], context),
             workspace=resolved_workspace,
             access=access,
             artifact_dir=artifact_dir,
@@ -138,7 +147,9 @@ def _agent_context(
         (artifact_dir / "response.txt").write_text(reply.text, "utf-8")
         return reply.text
 
-    return AgentNodeContext(
+    # Pylint misses the dataclass fields inherited from NodeContext.
+    # pylint: disable-next=unexpected-keyword-arg
+    return declarations.AgentNodeContext(
         run_id=context.run_id,
         graph_id=context.graph_id,
         node_id=context.node_id,

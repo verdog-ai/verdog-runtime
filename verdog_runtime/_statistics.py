@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
+import math
+import pathlib
+import time
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
-from dataclasses import dataclass
-from math import isfinite
-from pathlib import Path
-from time import monotonic, strftime
 from typing import Literal, cast
 
-from ._markdown import format_table
-from .cancellation import ExecutionCancelled
+from verdog_runtime import _markdown, cancellation
 
 TimingStatus = Literal["succeeded", "failed", "cancelled"]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class TimingRecord:
     path: str
     project_path: str
@@ -27,7 +26,7 @@ class TimingRecord:
     duration_seconds: float
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class TimingAggregate:
     project_path: str
     graph_id: str
@@ -37,7 +36,7 @@ class TimingAggregate:
     duration_seconds: float
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class StatisticsSnapshot:
     elapsed_seconds: float
     nodes: tuple[TimingAggregate, ...]
@@ -53,7 +52,7 @@ def validate_statistics_snapshot(snapshot: object, /) -> None:
     if (
         not isinstance(elapsed, (int, float))
         or isinstance(elapsed, bool)
-        or not isfinite(elapsed)
+        or not math.isfinite(elapsed)
         or elapsed < 0
     ):
         raise ValueError("checkpoint graph elapsed timing is invalid")
@@ -71,11 +70,15 @@ def validate_statistics_snapshot(snapshot: object, /) -> None:
             cast(object, node.node_id),
             cast(object, node.node_type),
         )
-        if not all(isinstance(value, str) and value for value in identity_values):
+        if not all(
+            isinstance(value, str) and value for value in identity_values
+        ):
             raise ValueError("checkpoint graph timing identity is invalid")
         identity = cast(tuple[str, str, str, str], identity_values)
         if identity in identities:
-            raise ValueError("checkpoint graph timing identities are not unique")
+            raise ValueError(
+                "checkpoint graph timing identities are not unique"
+            )
         identities.add(identity)
         visits = cast(object, node.visits)
         if type(visits) is not int or visits <= 0:
@@ -84,13 +87,13 @@ def validate_statistics_snapshot(snapshot: object, /) -> None:
         if (
             not isinstance(duration, (int, float))
             or isinstance(duration, bool)
-            or not isfinite(duration)
+            or not math.isfinite(duration)
             or duration < 0
         ):
             raise ValueError("checkpoint graph timing duration is invalid")
 
 
-@dataclass(slots=True, kw_only=True)
+@dataclasses.dataclass(slots=True, kw_only=True)
 class TimingSpan:
     """An explicitly managed node timing that may cross activation steps."""
 
@@ -109,7 +112,7 @@ class TimingSpan:
             return
         self._finished = True
         resolved = self.default_status if status is None else status
-        elapsed = monotonic() - self.started_at
+        elapsed = time.monotonic() - self.started_at
         self.statistics.accept(
             TimingRecord(
                 path=self.path,
@@ -129,31 +132,31 @@ class TimingSpan:
 class RunStatistics:
     def __init__(
         self,
-        root: Path,
+        root: pathlib.Path,
         *,
         started_at: float | None = None,
         record_handler: Callable[[TimingRecord], None] | None = None,
     ) -> None:
         self.root = root
-        self.started_at = monotonic() if started_at is None else started_at
+        self.started_at = time.monotonic() if started_at is None else started_at
         self._output_dir = root
         self._scope_started_at = self.started_at
         self._record_handler = record_handler
         self._nodes: dict[tuple[str, str, str, str], tuple[int, float]] = {}
 
-    def scoped(self, output_dir: Path) -> RunStatistics:
+    def scoped(self, output_dir: pathlib.Path) -> RunStatistics:
         scope = RunStatistics(
             self.root,
             started_at=self.started_at,
             record_handler=self._record_handler,
         )
         scope._output_dir = output_dir
-        scope._scope_started_at = monotonic()
+        scope._scope_started_at = time.monotonic()
         return scope
 
     def snapshot(self) -> StatisticsSnapshot:
         return StatisticsSnapshot(
-            elapsed_seconds=max(0.0, monotonic() - self._scope_started_at),
+            elapsed_seconds=max(0.0, time.monotonic() - self._scope_started_at),
             nodes=tuple(
                 TimingAggregate(
                     project_path=project_path,
@@ -174,7 +177,7 @@ class RunStatistics:
 
     def restore(self, snapshot: StatisticsSnapshot, /) -> None:
         validate_statistics_snapshot(snapshot)
-        self._scope_started_at = monotonic() - snapshot.elapsed_seconds
+        self._scope_started_at = time.monotonic() - snapshot.elapsed_seconds
         self._nodes = {
             (
                 node.project_path,
@@ -186,7 +189,12 @@ class RunStatistics:
         }
 
     def accept(self, record: TimingRecord) -> None:
-        key = (record.project_path, record.graph_id, record.node_id, record.node_type)
+        key = (
+            record.project_path,
+            record.graph_id,
+            record.node_id,
+            record.node_type,
+        )
         count, seconds = self._nodes.get(key, (0, 0.0))
         self._nodes[key] = count + 1, seconds + record.duration_seconds
         self.forward(record)
@@ -205,7 +213,7 @@ class RunStatistics:
         node_type: str,
         status: TimingStatus = "succeeded",
     ) -> TimingSpan:
-        started = monotonic()
+        started = time.monotonic()
         self._trace(f"START {path}")
         return TimingSpan(
             statistics=self,
@@ -219,7 +227,7 @@ class RunStatistics:
         )
 
     def _trace(self, message: str) -> None:
-        elapsed = monotonic() - self.started_at
+        elapsed = time.monotonic() - self.started_at
         # Retain an existing legacy log when resuming; dotted names cannot
         # collide with a node ID in the direct node/visit layout.
         path = self.root / "trace"
@@ -227,10 +235,11 @@ class RunStatistics:
             path = self.root / "trace.log"
         with path.open("a", encoding="utf-8") as trace:
             trace.write(
-                f"[{strftime('%Y-%m-%d %H:%M:%S')} +{elapsed:10.3f}s] {message}\n"
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"+{elapsed:10.3f}s] {message}\n"
             )
 
-    @contextmanager
+    @contextlib.contextmanager
     def measure(
         self,
         *,
@@ -252,14 +261,18 @@ class RunStatistics:
         try:
             yield
         except BaseException as error:
-            status = "cancelled" if isinstance(error, ExecutionCancelled) else "failed"
+            status = (
+                "cancelled"
+                if isinstance(error, cancellation.ExecutionCancelled)
+                else "failed"
+            )
             raise
         finally:
             span.finish(status)
 
     def write(self) -> None:
-        total = monotonic() - self._scope_started_at
-        nodes = format_table(
+        total = time.monotonic() - self._scope_started_at
+        nodes = _markdown.format_table(
             (
                 (*identity, count, f"{seconds:.6f}")
                 for identity, (count, seconds) in sorted(self._nodes.items())
@@ -270,7 +283,7 @@ class RunStatistics:
         for (_, _, _, kind), (count, seconds) in self._nodes.items():
             previous_count, previous_seconds = kinds.get(kind, (0, 0.0))
             kinds[kind] = previous_count + count, previous_seconds + seconds
-        summary = format_table(
+        summary = _markdown.format_table(
             (
                 ("Total", "", f"{total:.6f}"),
                 *(

@@ -7,21 +7,21 @@ has checked its own source and environment compatibility fingerprint.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import pathlib
+import types
 from collections.abc import Mapping
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
-from types import MappingProxyType
 from typing import Literal, cast
 
-from ._encoding import decode_base64, encode_base64
+from verdog_runtime import _encoding
 
 FORMAT_VERSION = 2
 _MAX_NESTING = 128
 ForkSessionPolicy = Literal["branch", "fresh"]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class PendingFork:
     run_id: str
     source_output: str
@@ -29,7 +29,7 @@ class PendingFork:
     sessions: ForkSessionPolicy
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ChildCheckpointBundle:
     compatibility: Mapping[str, str]
     runtime: bytes
@@ -38,7 +38,7 @@ class ChildCheckpointBundle:
 
 
 def _binary(value: bytes, /) -> str:
-    return encode_base64(value)
+    return _encoding.encode_base64(value)
 
 
 def _require_bytes(value: object, label: str, /) -> bytes:
@@ -51,15 +51,17 @@ def _decode_binary(value: object, label: str, /) -> bytes:
     if not isinstance(value, str):
         raise ValueError(f"child checkpoint {label} is not encoded bytes")
     try:
-        return decode_base64(value)
+        return _encoding.decode_base64(value)
     except ValueError as error:
-        raise ValueError(f"child checkpoint {label} is not encoded bytes") from error
+        raise ValueError(
+            f"child checkpoint {label} is not encoded bytes"
+        ) from error
 
 
 def _shard_name(value: object, /) -> str:
     if not isinstance(value, str):
         raise ValueError("child checkpoint shard name is invalid")
-    path = PurePosixPath(value)
+    path = pathlib.PurePosixPath(value)
     if (
         not value
         or "\\" in value
@@ -80,11 +82,17 @@ def _compatibility(value: object, /) -> Mapping[str, str]:
         for key, item in raw.items()
     ):
         raise ValueError("child checkpoint compatibility is invalid")
-    return MappingProxyType(dict(sorted(cast(dict[str, str], raw).items())))
+    return types.MappingProxyType(
+        dict(sorted(cast(dict[str, str], raw).items()))
+    )
 
 
 def _absolute_path(value: object, label: str, /) -> str:
-    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+    if (
+        not isinstance(value, str)
+        or not value
+        or not pathlib.Path(value).is_absolute()
+    ):
         raise ValueError(f"child checkpoint fork {label} is invalid")
     return value
 
@@ -106,7 +114,7 @@ def _pending_fork(value: object, /) -> PendingFork:
         raise ValueError("child checkpoint fork is invalid")
     source = _absolute_path(raw["source_output"], "source output")
     target = _absolute_path(raw["target_output"], "target output")
-    if Path(source).resolve() == Path(target).resolve():
+    if pathlib.Path(source).resolve() == pathlib.Path(target).resolve():
         raise ValueError("child checkpoint fork outputs must be distinct")
     return PendingFork(
         run_id=run_id,
@@ -155,7 +163,9 @@ def encode_child_checkpoint(bundle: ChildCheckpointBundle, /) -> bytes:
             for pending in pending_forks
         ],
     }
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
 
 
 def decode_child_checkpoint(payload: bytes, /) -> ChildCheckpointBundle:
@@ -180,7 +190,9 @@ def decode_child_checkpoint(payload: bytes, /) -> ChildCheckpointBundle:
         raise ValueError("unsupported child checkpoint bundle format")
     shard_values = raw["shards"]
     pending_values = raw["pending_forks"]
-    if not isinstance(shard_values, list) or not isinstance(pending_values, list):
+    if not isinstance(shard_values, list) or not isinstance(
+        pending_values, list
+    ):
         raise ValueError("child checkpoint bundle collections are invalid")
     shards: dict[str, bytes] = {}
     for value in cast(list[object], shard_values):
@@ -199,7 +211,7 @@ def decode_child_checkpoint(payload: bytes, /) -> ChildCheckpointBundle:
     return ChildCheckpointBundle(
         compatibility=_compatibility(raw["compatibility"]),
         runtime=_decode_binary(raw["runtime"], "runtime"),
-        shards=MappingProxyType(shards),
+        shards=types.MappingProxyType(shards),
         pending_forks=pending_forks,
     )
 
@@ -209,13 +221,12 @@ def mark_child_checkpoint_fork(
     /,
     *,
     run_id: str,
-    source_output: Path,
-    target_output: Path,
+    source_output: pathlib.Path,
+    target_output: pathlib.Path,
     sessions: ForkSessionPolicy,
     _depth: int = 0,
 ) -> bytes:
-    """Append a deferred transform without deserializing authored child state."""
-
+    """Append a transform without deserializing child state."""
     if _depth >= _MAX_NESTING:
         raise ValueError("child checkpoint nesting is too deep")
     source = source_output.resolve()

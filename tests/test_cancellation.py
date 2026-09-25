@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import pytest
+
 from verdog_runtime import CancellationToken, ExecutionCancelled
 
 
@@ -61,3 +63,9 @@ def test_timeout_uses_an_absolute_monotonic_deadline(
 def test_timeout_rejects_negative_and_non_finite_values(timeout: float) -> None:
     with pytest.raises(ValueError, match="finite and non-negative"):
         CancellationToken.with_timeout(timeout)
+
+
+def test_wait_rejects_an_unbounded_timeout() -> None:
+    token = CancellationToken()
+    with pytest.raises(ValueError, match="wait timeout must not be None"):
+        token.wait(cast(float, None))

@@ -8,6 +8,14 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+
+from verdog_runtime._run_store import (
+    Boundary,
+    CheckpointKind,
+    CheckpointSummary,
+    RunStatus,
+    RunStore,
+)
 from verdog_runtime.cli.local import Clone
 from verdog_runtime.cli.runner import LifecycleRequest
 from verdog_runtime.cli.runs import (
@@ -19,13 +27,6 @@ from verdog_runtime.cli.runs import (
     restart_run,
     resume_run,
     select_run,
-)
-from verdog_runtime._run_store import (
-    Boundary,
-    CheckpointKind,
-    CheckpointSummary,
-    RunStatus,
-    RunStore,
 )
 
 
@@ -96,12 +97,20 @@ def test_discovery_includes_default_and_registered_custom_outputs(
         custom.output_dir,
     }
     by_id = {run.manifest.id: run for run in discovery.runs}
-    assert by_id["11111111-1111-4111-8111-111111111111"].status is RunStatus.SUCCEEDED
+    assert (
+        by_id["11111111-1111-4111-8111-111111111111"].status
+        is RunStatus.SUCCEEDED
+    )
     # A stale `running` manifest has no held lease and is presented honestly.
-    assert by_id["22222222-2222-4222-8222-222222222222"].status is RunStatus.INTERRUPTED
+    assert (
+        by_id["22222222-2222-4222-8222-222222222222"].status
+        is RunStatus.INTERRUPTED
+    )
 
 
-def test_default_discovery_finds_workflow_groups_without_a_registry(tmp_path: Path) -> None:
+def test_default_discovery_finds_workflow_groups_without_a_registry(
+    tmp_path: Path,
+) -> None:
     clone = _clone(tmp_path)
     root = clone.root / ".verdog/runs"
     outputs = (
@@ -116,7 +125,9 @@ def test_default_discovery_finds_workflow_groups_without_a_registry(tmp_path: Pa
         tmp_path / "external-run",
     )
     for index, output in enumerate((*outputs, *excluded)):
-        _run(clone, output, identifier=f"run-{index}", status=RunStatus.SUCCEEDED)
+        _run(
+            clone, output, identifier=f"run-{index}", status=RunStatus.SUCCEEDED
+        )
     (root / "linked-run").symlink_to(excluded[-1], target_is_directory=True)
     (clone.root / ".verdog/run-registry.json").unlink()
 
@@ -201,7 +212,7 @@ def test_checkpoint_selection_accepts_prefix_basename_and_path(
         requests.append(request)
         return 0
 
-    monkeypatch.setattr("verdog_runtime.cli.runs.operate", operate)
+    monkeypatch.setattr("verdog_runtime.cli.runner.operate", operate)
     monkeypatch.chdir(tmp_path)
     for reference in (
         identifier,
@@ -355,8 +366,12 @@ def test_unreadable_registered_outputs_remain_visible_as_selection_issues(
 
     discovery = discover_runs(clone.root)
     assert not discovery.runs
-    assert [issue.code for issue in discovery.issues] == ["run.manifest_unreadable"]
-    with pytest.raises(RunCommandError, match="1 unreadable run entry") as captured:
+    assert [issue.code for issue in discovery.issues] == [
+        "run.manifest_unreadable"
+    ]
+    with pytest.raises(
+        RunCommandError, match="1 unreadable run entry"
+    ) as captured:
         select_run(clone.root, None)
     details = cast(dict[str, object], captured.value.details)
     issues = cast(list[dict[str, object]], details["issues"])
@@ -387,7 +402,7 @@ def test_omitted_selector_counts_identified_corrupt_runs(
     def open_clone(_workflow: str) -> Clone:
         return clone
 
-    monkeypatch.setattr(cli, "open_clone", open_clone)
+    monkeypatch.setattr(cli.local, "open_clone", open_clone)
 
     assert cli.main(["checkpoints", "--json"]) == 1
     response = json.loads(capsys.readouterr().out)
@@ -416,10 +431,18 @@ def test_cli_registers_read_only_commands_and_emits_machine_errors(
     def open_clone(_workflow: str) -> Clone:
         return clone
 
-    monkeypatch.setattr(cli, "open_clone", open_clone)
+    monkeypatch.setattr(cli.local, "open_clone", open_clone)
 
     parsed = cli.parse_arguments(
-        ["runs", "main", "--status", "failed", "--status", "interrupted", "--json"]
+        [
+            "runs",
+            "main",
+            "--status",
+            "failed",
+            "--status",
+            "interrupted",
+            "--json",
+        ]
     )
     assert parsed.workflow == "main"
     assert parsed.status == ["failed", "interrupted"]
@@ -450,7 +473,7 @@ def test_lifecycle_commands_forward_explicit_semantics(
         calls.append(request)
         return 0
 
-    monkeypatch.setattr("verdog_runtime.cli.runs.operate", operate)
+    monkeypatch.setattr("verdog_runtime.cli.runner.operate", operate)
 
     assert resume_run(clone, reference="aaaaaaaa", retry_incomplete=True) == 0
     resume = calls[-1]

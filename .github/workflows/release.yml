@@ -38,6 +38,11 @@ jobs:
               raise SystemExit(f"Version mismatch: pyproject.toml={version}, tag={tag}")
           PYTHON
 
+      - name: Check style
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+
       - name: Test
         run: uv run --no-sync pytest
 

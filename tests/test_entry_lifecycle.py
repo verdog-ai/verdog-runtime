@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Never, cast
 
 import pytest
+
 from verdog_runtime import entry
 from verdog_runtime._lifecycle import LifecycleCommand, encode_lifecycle_command
 from verdog_runtime._run_store import RunStatus, RunStore
@@ -141,7 +142,7 @@ def test_resume_emits_one_json_document_and_redirects_workflow_stdout(
     def configured_definition(*_args: object) -> tuple[object, object]:
         return _definition()
 
-    monkeypatch.setattr(entry, "Dispatcher", FakeDispatcher)
+    monkeypatch.setattr(entry.interpreter, "Dispatcher", FakeDispatcher)
     monkeypatch.setattr(entry, "_configured_definition", configured_definition)
 
     request = _request(
@@ -199,7 +200,9 @@ def test_restart_allocates_a_child_and_preserves_argument_semantics(
                 workflow_id="example.main",
                 definition_id="example.main.entry",
                 module="example.workflows.main",
-                workflow_arguments=cast(tuple[str, ...], kwargs["workflow_arguments"]),
+                workflow_arguments=cast(
+                    tuple[str, ...], kwargs["workflow_arguments"]
+                ),
                 run_id="22222222-2222-4222-8222-222222222222",
             )
             store.update(status=RunStatus.SUCCEEDED)
@@ -211,7 +214,7 @@ def test_restart_allocates_a_child_and_preserves_argument_semantics(
     def output_directory(*_args: object) -> Path:
         return target
 
-    monkeypatch.setattr(entry, "Dispatcher", FakeDispatcher)
+    monkeypatch.setattr(entry.interpreter, "Dispatcher", FakeDispatcher)
     monkeypatch.setattr(entry, "_configured_definition", configured_definition)
     monkeypatch.setattr(entry, "_output_directory", output_directory)
 
@@ -330,7 +333,7 @@ def test_runtime_failure_returns_a_manifest_backed_failed_envelope(
     def configured_definition(*_args: object) -> tuple[object, object]:
         return _definition()
 
-    monkeypatch.setattr(entry, "Dispatcher", FakeDispatcher)
+    monkeypatch.setattr(entry.interpreter, "Dispatcher", FakeDispatcher)
     monkeypatch.setattr(entry, "_configured_definition", configured_definition)
 
     request = _request(
@@ -393,7 +396,7 @@ def test_main_decodes_the_versioned_lifecycle_command(
     assert request == command
 
 
-def test_run_protocol_does_not_consume_workflow_arguments_with_internal_spelling(
+def test_run_protocol_preserves_workflow_arguments_with_internal_spelling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

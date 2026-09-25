@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
-from dataclasses import dataclass
-from pathlib import Path
+import pathlib
 from typing import Literal, cast
 
 LIFECYCLE_COMMAND_VERSION = 1
@@ -33,13 +33,13 @@ _FIELDS = frozenset(
 )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class LifecycleCommand:
     operation: Operation
-    root: Path
+    root: pathlib.Path
     definition_id: str
     definition_module: str
-    source_output: Path
+    source_output: pathlib.Path
     sessions: SessionMode
     checkpoint: int | None
     arguments_mode: ArgumentMode
@@ -66,9 +66,9 @@ def _choice(
     return selected
 
 
-def _path(value: object, label: str, /) -> Path:
+def _path(value: object, label: str, /) -> pathlib.Path:
     raw = _string(value, label)
-    path = Path(raw)
+    path = pathlib.Path(raw)
     if not path.is_absolute():
         raise ValueError(f"invalid internal lifecycle {label}")
     return path.resolve()
@@ -116,7 +116,9 @@ def _command(value: object, /) -> LifecycleCommand:
         ),
         root=_path(body["root"], "project root"),
         definition_id=_string(body["definition_id"], "definition id"),
-        definition_module=_string(body["definition_module"], "definition module"),
+        definition_module=_string(
+            body["definition_module"], "definition module"
+        ),
         source_output=_path(body["source_output"], "source output"),
         sessions=cast(
             SessionMode,

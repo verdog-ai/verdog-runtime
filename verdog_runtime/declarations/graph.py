@@ -1,28 +1,20 @@
+"""Typed graph declarations and qualitative feature observations."""
+
 from __future__ import annotations
 
+import dataclasses
+import enum
+import types
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from enum import StrEnum
-from types import MappingProxyType, UnionType
 from typing import Any, Generic, TypeAlias, TypeVar, override
 
 from typing_extensions import TypeForm
 
-from .calls import CallVisitDefinition
-from .configuration import WorkflowConfiguration
-from .ids import (
-    AgentProfileId,
-    AgentSessionId,
-    EdgeId,
-    FeatureId,
-    GraphId,
-    NodeId,
-    ParameterAddress,
+from verdog_runtime.declarations import calls as call_declarations
+from verdog_runtime.declarations import (
+    configuration as configuration_declarations,
 )
-from .interfaces import AgentProfileInitializer
-from .keys import StateAddress, StateKey
-from .operations import Feature, Operation, ParameterType, SubroutineCall
-
+from verdog_runtime.declarations import ids, interfaces, keys, operations
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -31,82 +23,106 @@ ScopeT = TypeVar("ScopeT")
 FeatureValue: TypeAlias = bool | int | float | str
 FeatureValueT = TypeVar("FeatureValueT", bound=FeatureValue)
 ParamsT = TypeVar("ParamsT")
-_ContractType: TypeAlias = TypeForm[InputT] | UnionType
+_ContractType: TypeAlias = TypeForm[InputT] | types.UnionType
 
 
-class FeatureKind(StrEnum):
+class FeatureKind(enum.StrEnum):
+    """The value domain of a declared qualitative feature."""
+
     BOOLEAN = "boolean"
     ENUM = "enum"
     INTEGER = "integer"
     FLOAT = "float"
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class AgentProfileDefinition(Generic[InputT, ParamsT]):
-    id: AgentProfileId
+    """A local profile initialized from graph input and parameters."""
+
+    id: ids.AgentProfileId
     name: str
-    implementation: AgentProfileInitializer[InputT, ParamsT]
+    implementation: interfaces.AgentProfileInitializer[InputT, ParamsT]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSessionDefinition:
-    id: AgentSessionId
+    """A named session whose persistence is fixed by the declaration."""
+
+    id: ids.AgentSessionId
     name: str
     persistent: bool
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class AgentProfileParameter:
-    id: AgentProfileId
+    """A profile slot supplied by the caller of a graph."""
+
+    id: ids.AgentProfileId
     name: str
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSessionParameter:
-    id: AgentSessionId
+    """A session slot supplied by the caller of a graph."""
+
+    id: ids.AgentSessionId
     name: str
 
 
-class BooleanConditionObservation(StrEnum):
+class BooleanConditionObservation(enum.StrEnum):
+    """A required Boolean value before an edge is taken."""
+
     POSITIVE = "positive"
     NEGATIVE = "negative"
 
 
-class NumericalConditionObservation(StrEnum):
+class NumericalConditionObservation(enum.StrEnum):
+    """A required zero or positive value before an edge is taken."""
+
     EQUAL_ZERO = "equal_zero"
     GREATER_ZERO = "greater_zero"
 
 
-class EnumConditionObservation(StrEnum):
+class EnumConditionObservation(enum.StrEnum):
+    """An equality condition on an enumerated feature."""
+
     EQUAL = "equal"
 
 
-class BooleanEffectObservation(StrEnum):
+class BooleanEffectObservation(enum.StrEnum):
+    """A required Boolean value or change across a transition."""
+
     POSITIVE = "positive"
     NEGATIVE = "negative"
     UNCHANGED = "unchanged"
     UNCONSTRAINED = "unconstrained"
 
 
-class NumericalEffectObservation(StrEnum):
+class NumericalEffectObservation(enum.StrEnum):
+    """A required numerical change across a transition."""
+
     INCREASES = "increases"
     DECREASES = "decreases"
     UNCHANGED = "unchanged"
     UNCONSTRAINED = "unconstrained"
 
 
-class EnumEffectObservation(StrEnum):
+class EnumEffectObservation(enum.StrEnum):
+    """A required enum value or change across a transition."""
+
     EQUAL = "equal"
     UNCHANGED = "unchanged"
     UNCONSTRAINED = "unconstrained"
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class FeatureDefinition(
-    StateKey[FeatureValueT | None, ScopeT],
+    keys.StateKey[FeatureValueT | None, ScopeT],
     Generic[FeatureValueT, ScopeT],
 ):
-    id: FeatureId
+    """A typed state slot with its label, domain, and stable declaration ID."""
+
+    id: ids.FeatureId
     label: str
     description: str
     kind: FeatureKind
@@ -114,25 +130,31 @@ class FeatureDefinition(
 
     @property
     @override
-    def state_key(self) -> StateAddress:
+    def state_key(self) -> keys.StateAddress:
         return ("feature", str(self.id))
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class BooleanFeatureCondition:
-    feature_id: FeatureId
+    """A Boolean feature and its required source observation."""
+
+    feature_id: ids.FeatureId
     observation: BooleanConditionObservation
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class NumericalFeatureCondition:
-    feature_id: FeatureId
+    """A numerical feature and its required source observation."""
+
+    feature_id: ids.FeatureId
     observation: NumericalConditionObservation
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class EnumFeatureCondition:
-    feature_id: FeatureId
+    """An enum feature and its required source value."""
+
+    feature_id: ids.FeatureId
     observation: EnumConditionObservation
     value: str
 
@@ -142,21 +164,27 @@ FeatureCondition: TypeAlias = (
 )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class BooleanFeatureEffect:
-    feature_id: FeatureId
+    """A Boolean feature and its required transition observation."""
+
+    feature_id: ids.FeatureId
     observation: BooleanEffectObservation
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class NumericalFeatureEffect:
-    feature_id: FeatureId
+    """A numerical feature and its required transition observation."""
+
+    feature_id: ids.FeatureId
     observation: NumericalEffectObservation
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class EnumFeatureEffect:
-    feature_id: FeatureId
+    """An enum feature and its required observation or target value."""
+
+    feature_id: ids.FeatureId
     observation: EnumEffectObservation
     value: str | None = None
 
@@ -169,52 +197,68 @@ FeatureEffect: TypeAlias = (
 VisitImplementation: TypeAlias = Callable[..., object]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class VisitDefinition:
+    """The optional implementation attached to an ordinary edge visit."""
+
     implementation: VisitImplementation | None = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class NodeDefinition(StateKey[StateT, ScopeT], Generic[StateT, ScopeT]):
-    id: NodeId
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class NodeDefinition(keys.StateKey[StateT, ScopeT], Generic[StateT, ScopeT]):
+    """An operation and its per-node state contract."""
+
+    id: ids.NodeId
     name: str
-    operation: Operation
+    operation: operations.Operation
     state_type: type[StateT]
 
     @property
     @override
-    def state_key(self) -> StateAddress:
+    def state_key(self) -> keys.StateAddress:
         return ("node", str(self.id))
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class FeatureNodeDefinition:
-    id: NodeId
+    """A node whose operation may update the feature state."""
+
+    id: ids.NodeId
     name: str
-    operation: Feature
+    operation: operations.Feature
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class PortDefinition:
-    id: NodeId
+    """An entry, success, or failure boundary identified within a graph."""
+
+    id: ids.NodeId
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class EdgeDefinition:
-    id: EdgeId
-    source: NodeId
-    target: NodeId
+    """A directed transition with source conditions, effects, and a visit."""
+
+    id: ids.EdgeId
+    source: ids.NodeId
+    target: ids.NodeId
     name: str = ""
     conditions: tuple[FeatureCondition, ...] = ()
     effects: tuple[FeatureEffect, ...] = ()
     visit: (
-        VisitDefinition | CallVisitDefinition[Any, Any, Any, Any, Any, Any, Any] | None
+        VisitDefinition
+        | call_declarations.CallVisitDefinition[
+            Any, Any, Any, Any, Any, Any, Any
+        ]
+        | None
     ) = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class GraphDefinition(Generic[InputT, OutputT, ParamsT, ScopeT]):
-    id: GraphId
+    """A subroutine graph and its parameter, state, and resource contracts."""
+
+    id: ids.GraphId
     params_type: _ContractType[ParamsT]
     enter: PortDefinition
     exit: PortDefinition
@@ -234,29 +278,37 @@ class GraphDefinition(Generic[InputT, OutputT, ParamsT, ScopeT]):
     session_parameters: tuple[AgentSessionParameter, ...] = ()
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class WorkflowDefinition(Generic[InputT, OutputT, ParamsT, ScopeT]):
-    id: GraphId
+    """An entry subroutine with workflow resources and an input type."""
+
+    id: ids.GraphId
     input_type: _ContractType[InputT]
-    entry: SubroutineCall
-    configuration: WorkflowConfiguration
+    entry: operations.SubroutineCall
+    configuration: configuration_declarations.WorkflowConfiguration
     sessions: tuple[AgentSessionDefinition, ...] = ()
-    params_types: Mapping[ParameterAddress, ParameterType] = field(init=False)
+    params_types: Mapping[ids.ParameterAddress, operations.ParameterType] = (
+        dataclasses.field(init=False)
+    )
 
     def __post_init__(self) -> None:
+        """Validate the workflow ID and freeze the entry parameter types."""
         if not self.id:
             raise ValueError("workflow definition id must not be empty")
         object.__setattr__(
             self,
             "params_types",
-            MappingProxyType(dict(self.entry.params_types)),
+            types.MappingProxyType(dict(self.entry.params_types)),
         )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class SubroutineDefinition(Generic[InputT, OutputT, ParamsT, ScopeT]):
+    """A callable graph evaluated within its caller process."""
+
     graph: GraphDefinition[InputT, OutputT, ParamsT, ScopeT]
 
     def __post_init__(self) -> None:
+        """Validate the graph ID used to address this subroutine."""
         if not self.graph.id:
             raise ValueError("subroutine definition id must not be empty")

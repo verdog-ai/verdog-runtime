@@ -12,7 +12,6 @@ from verdog_runtime.declarations import (
 )
 from verdog_runtime.declarations.ids import GraphId, NodeId
 
-
 Input: TypeAlias = int | str
 Mode: TypeAlias = Literal["fast", "careful"]
 
@@ -44,7 +43,9 @@ def _workflow(
 
 
 def test_workflows_retain_their_cli_input_type() -> None:
-    workflow: Final[WorkflowDefinition[object, object, None, object]] = _workflow(Input)
+    workflow: Final[WorkflowDefinition[object, object, None, object]] = (
+        _workflow(Input)
+    )
 
     assert workflow.input_type == Input
 

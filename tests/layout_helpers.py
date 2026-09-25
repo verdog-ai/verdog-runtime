@@ -7,8 +7,8 @@ from verdog_runtime._statistics import RunStatistics
 from verdog_runtime.declarations.ids import GraphId
 from verdog_runtime.interpreter._continuation import GraphFrameSnapshot
 from verdog_runtime.interpreter.execution import (
-    _GraphOutput,  # pyright: ignore[reportPrivateUsage]
     _encoded_id,  # pyright: ignore[reportPrivateUsage]
+    _GraphOutput,  # pyright: ignore[reportPrivateUsage]
 )
 
 

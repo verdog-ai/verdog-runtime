@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import datetime
+import enum
+import pathlib
+import types
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from enum import StrEnum
-from pathlib import Path
-from types import MappingProxyType
 
 # The registry and legacy run manifests retain their original schema. Public
 # run-history documents and current storage manifests evolve independently
@@ -19,10 +19,10 @@ CHECKPOINT_MANIFEST_SCHEMA_VERSION = 3
 CONTROL_DIRECTORY = ".verdog"
 RUN_MANIFEST = "run.json"
 CHECKPOINT_DIRECTORY = "checkpoints"
-REGISTRY_PATH = Path(".verdog/run-registry.json")
-REGISTRY_LOCK = Path(".verdog/locks/run-registry.lock")
-EMPTY_COMPATIBILITY: Mapping[str, str] = MappingProxyType({})
-EMPTY_SHARDS: Mapping[str, bytes] = MappingProxyType({})
+REGISTRY_PATH = pathlib.Path(".verdog/run-registry.json")
+REGISTRY_LOCK = pathlib.Path(".verdog/locks/run-registry.lock")
+EMPTY_COMPATIBILITY: Mapping[str, str] = types.MappingProxyType({})
+EMPTY_SHARDS: Mapping[str, bytes] = types.MappingProxyType({})
 
 
 class RunStoreError(ValueError):
@@ -36,20 +36,20 @@ class RunStoreError(ValueError):
         self.details = details
 
 
-class RunStatus(StrEnum):
+class RunStatus(enum.StrEnum):
     RUNNING = "running"
     INTERRUPTED = "interrupted"
     FAILED = "failed"
     SUCCEEDED = "succeeded"
 
 
-class CheckpointPolicy(StrEnum):
+class CheckpointPolicy(enum.StrEnum):
     OFF = "off"
     AUTO = "auto"
     REQUIRED = "required"
 
 
-class CheckpointKind(StrEnum):
+class CheckpointKind(enum.StrEnum):
     ENTRY = "entry"
     NODE = "node"
     CHILD_START = "child-start"
@@ -57,7 +57,7 @@ class CheckpointKind(StrEnum):
     TERMINAL = "terminal"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class WorkflowIdentity:
     id: str
     definition_id: str
@@ -71,7 +71,7 @@ class WorkflowIdentity:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class LaunchRecord:
     workflow_arguments: tuple[str, ...]
     checkpointing: CheckpointPolicy
@@ -83,7 +83,7 @@ class LaunchRecord:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ParentRun:
     run_id: str
     operation: str
@@ -99,7 +99,7 @@ class ParentRun:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class CheckpointState:
     count: int = 0
     latest_completed: int | None = None
@@ -119,7 +119,7 @@ class CheckpointState:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class SessionIssue:
     address: str
     provider: str
@@ -135,7 +135,7 @@ class SessionIssue:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class SessionState:
     persistent: int = 0
     model: str = "copy-on-write"
@@ -151,7 +151,7 @@ class SessionState:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class RunManifest:
     id: str
     project_root: str
@@ -192,7 +192,9 @@ class RunManifest:
             value["sessions"] = self.sessions.as_json()
         return value
 
-    def as_summary(self, *, status: RunStatus | None = None) -> dict[str, object]:
+    def as_summary(
+        self, *, status: RunStatus | None = None
+    ) -> dict[str, object]:
         value = self.as_json()
         value.pop("schema_version")
         value.pop("project_root")
@@ -205,7 +207,7 @@ class RunManifest:
         return value
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class Boundary:
     project_path: str
     graph: str
@@ -223,7 +225,7 @@ class Boundary:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class CheckpointSummary:
     sequence: int
     created_at: str
@@ -242,7 +244,9 @@ class CheckpointSummary:
             "sequence": self.sequence,
             "created_at": self.created_at,
             "kind": self.kind.value,
-            "completed": None if self.completed is None else self.completed.as_json(),
+            "completed": None
+            if self.completed is None
+            else self.completed.as_json(),
             "next": None if self.next is None else self.next.as_json(),
             "restore_available": self.restore_available,
             "fork_with_branch_available": self.fork_with_branch_available,
@@ -259,5 +263,6 @@ class CheckpointSummary:
 
 def utc_now() -> str:
     """A canonical RFC 3339 UTC timestamp."""
-
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
+    )

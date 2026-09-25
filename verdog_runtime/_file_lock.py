@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
-from importlib import import_module
+import contextlib
+import importlib
 import os
+from collections.abc import Generator
 from typing import BinaryIO, Protocol, cast
 
 
@@ -18,11 +18,13 @@ class _WindowsLockApi(Protocol):
     LK_NBLCK: int
     LK_UNLCK: int
 
-    def locking(self, file_descriptor: int, mode: int, byte_count: int, /) -> None: ...
+    def locking(
+        self, file_descriptor: int, mode: int, byte_count: int, /
+    ) -> None: ...
 
 
 def _windows_lock_api() -> _WindowsLockApi:
-    return cast(_WindowsLockApi, import_module("msvcrt"))
+    return cast(_WindowsLockApi, importlib.import_module("msvcrt"))
 
 
 def _lock_windows(stream: BinaryIO, *, blocking: bool) -> None:
@@ -62,10 +64,9 @@ def _unlock_posix(stream: BinaryIO) -> None:
     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-@contextmanager
+@contextlib.contextmanager
 def locked_file(stream: BinaryIO, *, blocking: bool) -> Generator[None]:
     """Hold one advisory lock for the lifetime of the context."""
-
     if os.name == "nt":
         _lock_windows(stream, blocking=blocking)
     else:

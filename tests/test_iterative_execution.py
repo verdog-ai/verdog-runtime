@@ -10,6 +10,7 @@ from typing import Protocol
 
 import pytest
 from report_helpers import call_reports, table_rows
+
 from verdog_runtime.declarations import (
     CallContext,
     CallVisitDefinition,
@@ -61,10 +62,12 @@ def _deep_local_call_workflow(
     """Build a fixed-width sibling chain without recursing in the fixture."""
 
     graph_ids = (GraphId("deep.main"),) + tuple(
-        GraphId(f"deep.main__level_{level:04d}") for level in range(1, depth + 1)
+        GraphId(f"deep.main__level_{level:04d}")
+        for level in range(1, depth + 1)
     )
     module_names = tuple(
-        f"runtime_test_deep_local_call_{level:04d}" for level in range(depth + 1)
+        f"runtime_test_deep_local_call_{level:04d}"
+        for level in range(depth + 1)
     )
     params_types = {(".", graph_id): type(None) for graph_id in graph_ids}
 
@@ -187,7 +190,7 @@ def _cheap_node_output(
     *,
     status: str = "succeeded",
 ) -> Generator[Path]:
-    """Retain visit ordinals while avoiding 100,000 directories and trace writes."""
+    """Retain visit ordinals without 100,000 directories and trace writes."""
 
     del node_type, status
     graph_output.visits[node_id] = graph_output.visits.get(node_id, 0) + 1
@@ -259,7 +262,8 @@ def test_iterative_driver_reaches_100_000_transition_limit_without_recursion(
     )
 
     # The acceptance property is the iterative control driver, not filesystem
-    # throughput. All transition, routing, state, budget, and event code remains real.
+    # throughput. All transition, routing, state, budget, and event code remains
+    # real.
     monkeypatch.setattr(
         "verdog_runtime.interpreter.execution._GraphOutput.node",
         _cheap_node_output,
@@ -293,7 +297,7 @@ def test_nested_local_calls_exceed_python_recursion_limit(
     previous_limit = sys.getrecursionlimit()
     try:
         sys.setrecursionlimit(_TEST_RECURSION_LIMIT)
-        assert _DEEP_CALL_DEPTH > sys.getrecursionlimit()
+        assert sys.getrecursionlimit() < _DEEP_CALL_DEPTH
         result = Dispatcher(
             project_root=tmp_path,
             transition_limit=2 * _DEEP_CALL_DEPTH + 1,
@@ -312,7 +316,9 @@ def test_nested_local_calls_exceed_python_recursion_limit(
     for _graph_id in graph_ids[1:]:
         graph_directory /= "call/000001"
         assert graph_directory.is_dir()
-    assert len(graph_directory.relative_to(output).parts) == 2 * _DEEP_CALL_DEPTH
+    assert (
+        len(graph_directory.relative_to(output).parts) == 2 * _DEEP_CALL_DEPTH
+    )
     assert not (output / "activations").exists()
 
 
@@ -355,15 +361,12 @@ def test_nested_node_visits_preserve_artifacts_and_report_call_chain(
         assert child == report_dirs[index] / "call/000001"
     for graph_id, directory in zip(graph_ids, report_dirs, strict=True):
         assert (directory / "enter/000001").is_dir()
-        assert {row[1] for row in table_rows(directory / "stats.md", "Nodes")} == {
-            str(graph_id)
-        }
+        assert {
+            row[1] for row in table_rows(directory / "stats.md", "Nodes")
+        } == {str(graph_id)}
 
     expected_artifacts = tuple(
-        report_dirs[index]
-        / "call"
-        / "000001"
-        / "adapter.txt"
+        report_dirs[index] / "call" / "000001" / "adapter.txt"
         for index in range(depth)
     )
     assert set(output.rglob("adapter.txt")) == set(expected_artifacts)
@@ -374,7 +377,8 @@ def test_nested_node_visits_preserve_artifacts_and_report_call_chain(
         f"{graph_ids[1]}: 1->{depth}",
     ]
     assert [
-        len(artifact.relative_to(output).parts) for artifact in expected_artifacts
+        len(artifact.relative_to(output).parts)
+        for artifact in expected_artifacts
     ] == [3, 5]
 
 
@@ -385,12 +389,18 @@ def test_root_node_named_trace_does_not_collide_with_the_run_log(
     workflow, _ = _deep_local_call_workflow(monkeypatch, 1, call_id="trace")
     output = tmp_path / "trace-node"
 
-    result = Dispatcher(project_root=tmp_path).run(workflow, 0, output_dir=output)
+    result = Dispatcher(project_root=tmp_path).run(
+        workflow, 0, output_dir=output
+    )
 
     assert result.output == 1
     assert {path.name for path in output.iterdir() if path.is_dir()} == {
-        "enter", "trace", "exit"
+        "enter",
+        "trace",
+        "exit",
     }
     assert (output / "trace/000001/enter/000001").is_dir()
     assert "START trace/000001" in (output / "trace.log").read_text("utf-8")
-    assert call_reports(output / "config.md") == [output / "trace/000001/config.md"]
+    assert call_reports(output / "config.md") == [
+        output / "trace/000001/config.md"
+    ]

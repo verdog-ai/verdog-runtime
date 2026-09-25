@@ -238,7 +238,9 @@ def test_enter_port_must_not_have_an_incoming_edge() -> None:
         target=graph.enter.id,
     )
 
-    with pytest.raises(ValueError, match="enter port must not have an incoming edge"):
+    with pytest.raises(
+        ValueError, match="enter port must not have an incoming edge"
+    ):
         validate_graph(replace(graph, edges=(*graph.edges, incoming)))
 
 

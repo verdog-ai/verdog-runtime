@@ -1,31 +1,26 @@
+"""Invoke Codex CLI sessions and collect their responses and artifacts."""
+
 from __future__ import annotations
 
+import dataclasses
 import json
-from dataclasses import dataclass
-from pathlib import Path
-from tempfile import TemporaryDirectory
+import pathlib
+import tempfile
 from typing import cast
 
-from ..declarations.agents import (
-    AgentInvocationError,
-    AgentReply,
-    AgentRequest,
-    AgentSessionAction,
-    AgentSessionCapabilities,
-)
-from ..declarations.ids import ProviderSessionId
-from ._command import (
-    CommandResult,
-    invoke_provider,
-    json_objects,
-    validate_extra_args,
-)
+from verdog_runtime.agents import _command as provider_command
+from verdog_runtime.declarations import agents as agent_declarations
+from verdog_runtime.declarations import ids
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class CodexInvoker:
+    """Codex CLI configuration implementing the agent invocation protocol."""
+
     session_provider = "codex"
-    session_capabilities = AgentSessionCapabilities(fork_latest=True)
+    session_capabilities = agent_declarations.AgentSessionCapabilities(
+        fork_latest=True
+    )
 
     executable: str = "codex"
     model: str | None = None
@@ -35,7 +30,8 @@ class CodexInvoker:
     web_search: bool = False
 
     def __post_init__(self) -> None:
-        validate_extra_args(
+        """Reject extra arguments that override runtime invocation flags."""
+        provider_command.validate_extra_args(
             self.extra_args,
             {
                 "--add-dir",
@@ -58,10 +54,13 @@ class CodexInvoker:
             "codex",
         )
 
-    def __call__(self, request: AgentRequest, /) -> AgentReply:
-        with TemporaryDirectory() as temporary:
-            last_message = Path(temporary) / "last-message.txt"
-            return invoke_provider(
+    def __call__(
+        self, request: agent_declarations.AgentRequest, /
+    ) -> agent_declarations.AgentReply:
+        """Run one request and retain its session and diagnostic artifacts."""
+        with tempfile.TemporaryDirectory() as temporary:
+            last_message = pathlib.Path(temporary) / "last-message.txt"
+            return provider_command.invoke_provider(
                 request,
                 "codex",
                 self.executable,
@@ -70,7 +69,12 @@ class CodexInvoker:
                 lambda result: _provider_result(result, last_message),
             )
 
-    def _command(self, request: AgentRequest, last_message: Path, /) -> list[str]:
+    def _command(
+        self,
+        request: agent_declarations.AgentRequest,
+        last_message: pathlib.Path,
+        /,
+    ) -> list[str]:
         command = [self.executable, "exec", *self.extra_args]
         command.extend(
             (
@@ -88,7 +92,8 @@ class CodexInvoker:
             command.extend(
                 (
                     "-c",
-                    "model_reasoning_effort=" + json.dumps(self.reasoning_effort),
+                    "model_reasoning_effort="
+                    + json.dumps(self.reasoning_effort),
                 )
             )
         if not request.persistent:
@@ -99,7 +104,8 @@ class CodexInvoker:
         if request.provider_session_id is not None:
             subcommand = (
                 "fork"
-                if request.provider_session_action is AgentSessionAction.FORK
+                if request.provider_session_action
+                is agent_declarations.AgentSessionAction.FORK
                 else "resume"
             )
             command.extend((subcommand, str(request.provider_session_id)))
@@ -107,20 +113,28 @@ class CodexInvoker:
         return command
 
 
-def _codex_session(event: dict[str, object], /) -> ProviderSessionId | None:
+def _codex_session(event: dict[str, object], /) -> ids.ProviderSessionId | None:
     session = (
         event.get("thread_id")
         or event.get("session_id")
         or event.get("conversation_id")
     )
-    return ProviderSessionId(session) if isinstance(session, str) and session else None
+    return (
+        ids.ProviderSessionId(session)
+        if isinstance(session, str) and session
+        else None
+    )
 
 
-def _codex_event_text(event: dict[str, object], /) -> tuple[str | None, str | None]:
+def _codex_event_text(
+    event: dict[str, object], /
+) -> tuple[str | None, str | None]:
     message: str | None = None
     top_level_reasoning = event.get("type") == "agent_reasoning"
     reasoning_value = (
-        event.get("text") or event.get("reasoning") if top_level_reasoning else None
+        event.get("text") or event.get("reasoning")
+        if top_level_reasoning
+        else None
     )
     item = event.get("item")
     if isinstance(item, dict):
@@ -141,16 +155,16 @@ def _codex_event_text(event: dict[str, object], /) -> tuple[str | None, str | No
 
 
 def _provider_result(
-    result: CommandResult, last_message: Path, /
-) -> tuple[str, ProviderSessionId | None, str]:
+    result: provider_command.CommandResult, last_message: pathlib.Path, /
+) -> tuple[str, ids.ProviderSessionId | None, str]:
     try:
         response = last_message.read_text("utf-8")
     except FileNotFoundError:
         response = ""
-    provider_session_id: ProviderSessionId | None = None
+    provider_session_id: ids.ProviderSessionId | None = None
     messages: list[str] = []
     reasoning: list[str] = []
-    for event in json_objects(result.events):
+    for event in provider_command.json_objects(result.events):
         provider_session_id = provider_session_id or _codex_session(event)
         message, thought = _codex_event_text(event)
         if message is not None:
@@ -159,6 +173,8 @@ def _provider_result(
             reasoning.append(thought)
     if not response:
         if not messages:
-            raise AgentInvocationError("codex returned no final response")
+            raise agent_declarations.AgentInvocationError(
+                "codex returned no final response"
+            )
         response = messages[-1]
     return response, provider_session_id, "\n\n".join(reasoning)

@@ -8,68 +8,54 @@ definition is loaded in a new process.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import pathlib
+import types
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass, replace
-from hashlib import sha256
-from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Literal, TypeAlias, cast
 
 import cloudpickle
 
-from .._statistics import (
-    EMPTY_STATISTICS,
-    StatisticsSnapshot,
-    validate_statistics_snapshot,
-)
-from ..declarations import (
-    AgentAccess,
-    FeatureDefinition,
-    FeatureNodeDefinition,
-    GraphDefinition,
-    NodeDefinition,
-    WorkflowState,
-)
-from ..declarations.ids import EdgeId, GraphId, NodeId, ParameterAddress, RunId
-from ..declarations.keys import StateAddress, StateKey
-from .features import validate_feature_value
-from .policies import SessionPolicy
-from .validation import require_immutable_state
+from verdog_runtime import _statistics, declarations
+from verdog_runtime.declarations import ids, keys
+from verdog_runtime.interpreter import features as feature_semantics
+from verdog_runtime.interpreter import policies, validation
 
 FORMAT_VERSION = 4
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class DefinitionReference:
     kind: Literal["subroutine", "workflow"]
-    id: GraphId
+    id: ids.GraphId
     module: str
     project_path: str
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class StateSlot:
-    address: StateAddress
+    address: keys.StateAddress
     value: object
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Ready:
-    incoming_edge_id: EdgeId
-    target_node_id: NodeId
+    incoming_edge_id: ids.EdgeId
+    target_node_id: ids.NodeId
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class WaitingForChild:
     call_frame_id: str
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ChildReturned:
     call_frame_id: str
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Terminal:
     outcome: Literal["success", "failure"]
 
@@ -77,34 +63,35 @@ class Terminal:
 GraphControl: TypeAlias = Ready | WaitingForChild | ChildReturned | Terminal
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class GraphFrameSnapshot:
     frame_id: str
     definition: DefinitionReference
-    scope_current: GraphId
-    scope_root: GraphId
-    scope_root_workflow_id: GraphId | None
+    scope_current: ids.GraphId
+    scope_root: ids.GraphId
+    scope_root_workflow_id: ids.GraphId | None
     call_path: str
     entry_input: object
     params: object
     value: object
     state: tuple[StateSlot, ...]
     control: GraphControl
-    visits: tuple[tuple[NodeId, int], ...]
+    visits: tuple[tuple[ids.NodeId, int], ...]
     session_bindings: tuple[tuple[str, str], ...]
-    statistics: StatisticsSnapshot = EMPTY_STATISTICS
-    # None denotes the older graph-wrapped layout, whose reports are one level up.
+    statistics: _statistics.StatisticsSnapshot = _statistics.EMPTY_STATISTICS
+    # None denotes the older graph-wrapped layout, whose reports are one level
+    # up.
     report_path: str | None = None
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class CallFrameSnapshot:
     frame_id: str
     parent_graph_frame_id: str
-    node_id: NodeId
-    incoming_edge_id: EdgeId
+    node_id: ids.NodeId
+    incoming_edge_id: ids.EdgeId
     visit_path: str
-    adapter_run_id: RunId
+    adapter_run_id: ids.RunId
     operation: DefinitionReference
     input: object
     prior_state: object
@@ -122,7 +109,7 @@ class CallFrameSnapshot:
 FrameSnapshot: TypeAlias = GraphFrameSnapshot | CallFrameSnapshot
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class SessionSnapshot:
     resource_id: str
     persistent: bool
@@ -134,42 +121,43 @@ class SessionSnapshot:
     tainted: bool = False
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ParameterSlot:
-    address: ParameterAddress
+    address: ids.ParameterAddress
     value: object
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ContinuationSnapshot:
     format_version: int
-    run_id: RunId
+    run_id: ids.RunId
     transitions_remaining: int
     frames: tuple[FrameSnapshot, ...]
     sessions: tuple[SessionSnapshot, ...]
     parameters: tuple[ParameterSlot, ...] = ()
 
 
-def snapshot_workflow_state(state: WorkflowState[Any], /) -> tuple[StateSlot, ...]:
+def snapshot_workflow_state(
+    state: declarations.WorkflowState[Any], /
+) -> tuple[StateSlot, ...]:
     """Return deterministic, definition-independent state slots."""
-
     raw = cast(
-        dict[int, tuple[StateKey[Any, Any], object]],
+        dict[int, tuple[keys.StateKey[Any, Any], object]],
         state._states,  # pyright: ignore[reportPrivateUsage]
     )
     slots = (
-        StateSlot(address=owner.state_key, value=value) for owner, value in raw.values()
+        StateSlot(address=owner.state_key, value=value)
+        for owner, value in raw.values()
     )
     return tuple(sorted(slots, key=lambda slot: slot.address))
 
 
 def restore_workflow_state(
-    graph: GraphDefinition[Any, Any, Any, Any],
+    graph: declarations.GraphDefinition[Any, Any, Any, Any],
     slots: tuple[StateSlot, ...],
     /,
-) -> WorkflowState[Any]:
-    """Validate slots against a freshly loaded graph and create a new universe."""
-
+) -> declarations.WorkflowState[Any]:
+    """Validate slots against a fresh graph and create a state universe."""
     owners = _state_owners(graph)
     values = _state_values(slots)
     missing = owners.keys() - values.keys()
@@ -184,49 +172,59 @@ def restore_workflow_state(
         (owner, _validated_state_value(owner, values[address]))
         for address, owner in owners.items()
     ]
-    return WorkflowState[Any]._initial(  # pyright: ignore[reportPrivateUsage]
+    return declarations.WorkflowState[Any]._initial(  # pyright: ignore[reportPrivateUsage]
         restored
     )
 
 
 def _state_owners(
-    graph: GraphDefinition[Any, Any, Any, Any], /
-) -> dict[StateAddress, StateKey[Any, Any]]:
-    owners: dict[StateAddress, StateKey[Any, Any]] = {}
+    graph: declarations.GraphDefinition[Any, Any, Any, Any], /
+) -> dict[keys.StateAddress, keys.StateKey[Any, Any]]:
+    owners: dict[keys.StateAddress, keys.StateKey[Any, Any]] = {}
     for node in graph.nodes:
-        if isinstance(node, FeatureNodeDefinition):
+        if isinstance(node, declarations.FeatureNodeDefinition):
             continue
         if node.state_key in owners:
-            raise ValueError(f"duplicate workflow state address: {node.state_key!r}")
+            raise ValueError(
+                f"duplicate workflow state address: {node.state_key!r}"
+            )
         owners[node.state_key] = node
     for feature in graph.features:
         if feature.state_key in owners:
-            raise ValueError(f"duplicate workflow state address: {feature.state_key!r}")
+            raise ValueError(
+                f"duplicate workflow state address: {feature.state_key!r}"
+            )
         owners[feature.state_key] = feature
     return owners
 
 
-def _state_values(slots: tuple[StateSlot, ...], /) -> dict[StateAddress, object]:
-    values: dict[StateAddress, object] = {}
+def _state_values(
+    slots: tuple[StateSlot, ...], /
+) -> dict[keys.StateAddress, object]:
+    values: dict[keys.StateAddress, object] = {}
     for slot in slots:
         if slot.address in values:
-            raise ValueError(f"duplicate checkpoint state address: {slot.address!r}")
+            raise ValueError(
+                f"duplicate checkpoint state address: {slot.address!r}"
+            )
         values[slot.address] = slot.value
     return values
 
 
-def _validated_state_value(owner: StateKey[Any, Any], value: object, /) -> object:
-    if isinstance(owner, NodeDefinition):
+def _validated_state_value(
+    owner: keys.StateKey[Any, Any], value: object, /
+) -> object:
+    if isinstance(owner, declarations.NodeDefinition):
         if type(value) is not owner.state_type:
             raise TypeError(
                 f"checkpoint state for node {owner.id} has type "
                 f"{type(value).__name__}, expected {owner.state_type.__name__}"
             )
-        require_immutable_state(value)
+        validation.require_immutable_state(value)
         return value
-    feature = cast(FeatureDefinition[Any, Any], owner)
+    feature = cast(declarations.FeatureDefinition[Any, Any], owner)
     if value is not None:
-        validate_feature_value(feature, value)
+        feature_semantics.validate_feature_value(feature, value)
     return value
 
 
@@ -242,10 +240,12 @@ def decode_continuation(payload: bytes, /) -> ContinuationSnapshot:
     _validate_continuation(value)
     # Old slotted instances have no report_path slot value. Normalize it before
     # dataclass rebasing during a fork; their physical output paths stay intact.
-    return replace(
+    return dataclasses.replace(
         value,
         frames=tuple(
-            replace(frame, report_path=getattr(frame, "report_path", None))
+            dataclasses.replace(
+                frame, report_path=getattr(frame, "report_path", None)
+            )
             if isinstance(frame, GraphFrameSnapshot)
             else frame
             for frame in value.frames
@@ -254,7 +254,7 @@ def decode_continuation(payload: bytes, /) -> ContinuationSnapshot:
 
 
 def continuation_digest(payload: bytes, /) -> str:
-    return sha256(payload).hexdigest()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _validate_continuation(snapshot: ContinuationSnapshot, /) -> None:
@@ -288,7 +288,9 @@ def _validate_continuation(snapshot: ContinuationSnapshot, /) -> None:
         raise ValueError("checkpoint continuation parameters are invalid")
     addresses = [parameter.address for parameter in snapshot.parameters]
     if len(addresses) != len(set(addresses)):
-        raise ValueError("checkpoint continuation parameter addresses must be unique")
+        raise ValueError(
+            "checkpoint continuation parameter addresses must be unique"
+        )
     frame_ids = [frame.frame_id for frame in snapshot.frames]
     if any(not frame_id for frame_id in frame_ids) or len(frame_ids) != len(
         set(frame_ids)
@@ -296,92 +298,127 @@ def _validate_continuation(snapshot: ContinuationSnapshot, /) -> None:
         raise ValueError("checkpoint continuation frame ids must be unique")
     for frame in snapshot.frames:
         if isinstance(frame, GraphFrameSnapshot):
-            validate_statistics_snapshot(frame.statistics)
-            report_path: object = getattr(frame, "report_path", None)
-            if report_path is not None and (
-                not isinstance(report_path, str)
-                or not report_path
-                or Path(report_path).is_absolute()
-                or ".." in Path(report_path).parts
-                or Path(report_path).as_posix() != report_path
-                or Path(report_path) not in {
-                    Path(frame.call_path), Path(frame.call_path).parent
-                }
-            ):
-                raise ValueError("checkpoint graph report path is invalid")
-    calls = tuple(
-        frame for frame in snapshot.frames if isinstance(frame, CallFrameSnapshot)
-    )
-    if any(
+            _validate_graph_frame(frame)
+        else:
+            _validate_call_frame(frame)
+    _validate_sessions(snapshot)
+
+
+def _validate_graph_frame(frame: GraphFrameSnapshot, /) -> None:
+    """Validate graph-local reports independently of call progress."""
+    _statistics.validate_statistics_snapshot(frame.statistics)
+    report_path: object = getattr(frame, "report_path", None)
+    if report_path is None:
+        return
+    if not isinstance(report_path, str) or not report_path:
+        raise ValueError("checkpoint graph report path is invalid")
+    path = pathlib.Path(report_path)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or path.as_posix() != report_path
+        or path
+        not in {
+            pathlib.Path(frame.call_path),
+            pathlib.Path(frame.call_path).parent,
+        }
+    ):
+        raise ValueError("checkpoint graph report path is invalid")
+
+
+def _validate_call_frame(frame: CallFrameSnapshot, /) -> None:
+    """Validate the child identity and results permitted in each call phase."""
+    if (
         not isinstance(cast(object, frame.adapter_run_id), str)
         or not frame.adapter_run_id
-        for frame in calls
     ):
         raise ValueError("checkpoint call adapter run id is invalid")
-    phases = {"child_pending", "child_active", "child_returned"}
-    for frame in calls:
-        raw_phase = cast(object, frame.phase)
-        if not isinstance(raw_phase, str) or raw_phase not in phases:
-            raise ValueError("checkpoint call phase is invalid")
-        activation_id = cast(object, frame.child_activation_id)
-        child_call_path = cast(object, frame.child_call_path)
-        operation_kind = cast(object, frame.operation.kind)
-        if operation_kind not in {"subroutine", "workflow"}:
-            raise ValueError("checkpoint call operation kind is invalid")
-        if frame.phase == "child_pending":
-            if activation_id is not None or child_call_path is not None:
-                raise ValueError("pending checkpoint call has a child attempt")
-            if (
-                frame.child_graph_frame_id is not None
-                or frame.child_output is not None
-                or frame.child_error is not None
-            ):
-                raise ValueError("pending checkpoint call has child results")
-            continue
-        if child_call_path is not None:
-            child_path = (
-                Path(child_call_path) if isinstance(child_call_path, str) else None
+    raw_phase = cast(object, frame.phase)
+    if not isinstance(raw_phase, str) or raw_phase not in {
+        "child_pending",
+        "child_active",
+        "child_returned",
+    }:
+        raise ValueError("checkpoint call phase is invalid")
+    operation_kind = cast(object, frame.operation.kind)
+    if operation_kind not in {"subroutine", "workflow"}:
+        raise ValueError("checkpoint call operation kind is invalid")
+    if frame.phase == "child_pending":
+        if (
+            frame.child_activation_id is not None
+            or frame.child_call_path is not None
+        ):
+            raise ValueError("pending checkpoint call has a child attempt")
+        if (
+            frame.child_graph_frame_id is not None
+            or frame.child_output is not None
+            or frame.child_error is not None
+        ):
+            raise ValueError("pending checkpoint call has child results")
+        return
+    _validate_started_child(frame)
+    if frame.phase == "child_active":
+        if frame.child_output is not None or frame.child_error is not None:
+            raise ValueError("active checkpoint call has child results")
+    else:
+        raw_child_error = cast(object, frame.child_error)
+        if raw_child_error is not None and not isinstance(
+            raw_child_error, Exception
+        ):
+            raise ValueError(
+                "returned checkpoint call has an invalid child error"
             )
-            if (
-                child_path is None
-                or not child_call_path
-                or child_path.is_absolute()
-                or ".." in child_path.parts
-                or child_path.as_posix() != child_call_path
-            ):
-                raise ValueError("started checkpoint call has an invalid child path")
-        if operation_kind == "subroutine":
-            if not isinstance(activation_id, str) or not activation_id:
-                raise ValueError("started local checkpoint call has no activation id")
-            if frame.child_graph_frame_id != frame.child_activation_id:
-                raise ValueError(
-                    "started local checkpoint call has no matching child graph"
-                )
-        else:
-            if activation_id is not None or child_call_path is None:
-                raise ValueError(
-                    "started workflow checkpoint call has no valid child path"
-                )
-            if frame.child_graph_frame_id is not None:
-                raise ValueError("workflow checkpoint call identifies a local graph")
-        if frame.phase == "child_active":
-            if frame.child_output is not None or frame.child_error is not None:
-                raise ValueError("active checkpoint call has child results")
-        elif frame.phase == "child_returned":
-            raw_child_error = cast(object, frame.child_error)
-            if raw_child_error is not None and not isinstance(
-                raw_child_error, Exception
-            ):
-                raise ValueError("returned checkpoint call has an invalid child error")
-            if frame.child_output is not None and raw_child_error is not None:
-                raise ValueError("returned checkpoint call has both output and error")
-    _validate_sessions(snapshot)
+        if frame.child_output is not None and raw_child_error is not None:
+            raise ValueError(
+                "returned checkpoint call has both output and error"
+            )
+
+
+def _validate_started_child(frame: CallFrameSnapshot, /) -> None:
+    """Distinguish in-process activation IDs from external workflow paths."""
+    child_call_path = cast(object, frame.child_call_path)
+    if child_call_path is not None:
+        if not isinstance(child_call_path, str) or not child_call_path:
+            raise ValueError(
+                "started checkpoint call has an invalid child path"
+            )
+        child_path = pathlib.Path(child_call_path)
+        if (
+            child_path.is_absolute()
+            or ".." in child_path.parts
+            or child_path.as_posix() != child_call_path
+        ):
+            raise ValueError(
+                "started checkpoint call has an invalid child path"
+            )
+    activation_id = cast(object, frame.child_activation_id)
+    if frame.operation.kind == "subroutine":
+        if not isinstance(activation_id, str) or not activation_id:
+            raise ValueError(
+                "started local checkpoint call has no activation id"
+            )
+        if frame.child_graph_frame_id != frame.child_activation_id:
+            raise ValueError(
+                "started local checkpoint call has no matching child graph"
+            )
+    else:
+        if activation_id is not None or child_call_path is None:
+            raise ValueError(
+                "started workflow checkpoint call has no valid child path"
+            )
+        if frame.child_graph_frame_id is not None:
+            raise ValueError(
+                "workflow checkpoint call identifies a local graph"
+            )
 
 
 def _validate_session(session: SessionSnapshot, /) -> None:
     if type(session.persistent) is not bool:
         raise ValueError("checkpoint session persistence is invalid")
-    if type(session.copy_on_write) is not bool or type(session.tainted) is not bool:
+    if (
+        type(session.copy_on_write) is not bool
+        or type(session.tainted) is not bool
+    ):
         raise ValueError("checkpoint session recovery state is invalid")
     if (
         session.branch_supported is not None
@@ -391,14 +428,16 @@ def _validate_session(session: SessionSnapshot, /) -> None:
     provider = session.provider
     provider_id = session.provider_session_id
     access = session.access
-    anchored = provider is not None or provider_id is not None or access is not None
+    anchored = (
+        provider is not None or provider_id is not None or access is not None
+    )
     if anchored and (
         not session.persistent
         or not isinstance(provider, str)
         or not provider
         or not isinstance(provider_id, str)
         or not provider_id
-        or access not in {item.value for item in AgentAccess}
+        or access not in {item.value for item in declarations.AgentAccess}
     ):
         raise ValueError("checkpoint provider session anchor is invalid")
     if session.copy_on_write and (
@@ -420,7 +459,11 @@ def _validate_session_bindings(
             continue
         local: set[str] = set()
         for session_id, resource_id in frame.session_bindings:
-            if not session_id or session_id in local or resource_id not in sessions:
+            if (
+                not session_id
+                or session_id in local
+                or resource_id not in sessions
+            ):
                 raise ValueError("checkpoint session binding is invalid")
             local.add(session_id)
             referenced.add(resource_id)
@@ -444,18 +487,20 @@ def _validate_sessions(snapshot: ContinuationSnapshot, /) -> None:
 
 def _rebase_value(
     value: object,
-    source: Path,
-    target: Path,
+    source: pathlib.Path,
+    target: pathlib.Path,
     active: set[int],
     /,
 ) -> object:
-    if isinstance(value, Path):
+    if isinstance(value, pathlib.Path):
         return _rebase_path(value, source, target)
     if value is None or isinstance(value, (str, bytes, int, float, bool, type)):
         return value
     identity = id(value)
     if identity in active:
-        raise ValueError("checkpoint values with reference cycles cannot be rebased")
+        raise ValueError(
+            "checkpoint values with reference cycles cannot be rebased"
+        )
     active.add(identity)
     try:
         return _rebase_composite(value, source, target, active)
@@ -465,15 +510,17 @@ def _rebase_value(
 
 def _rebase_composite(
     value: object,
-    source: Path,
-    target: Path,
+    source: pathlib.Path,
+    target: pathlib.Path,
     active: set[int],
     /,
 ) -> object:
-    if is_dataclass(value) and not isinstance(value, type):
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return _rebase_dataclass(value, source, target, active)
     if isinstance(value, tuple):
-        return _rebase_tuple(cast(tuple[object, ...], value), source, target, active)
+        return _rebase_tuple(
+            cast(tuple[object, ...], value), source, target, active
+        )
     if isinstance(value, list):
         items = cast(list[object], value)
         return [_rebase_value(item, source, target, active) for item in items]
@@ -490,14 +537,18 @@ def _rebase_composite(
         return rebased
     if isinstance(value, set):
         items = cast(set[object], value)
-        rebased = {_rebase_value(item, source, target, active) for item in items}
+        rebased = {
+            _rebase_value(item, source, target, active) for item in items
+        }
         if len(rebased) != len(items):
             raise ValueError("checkpoint set items collide after path rebasing")
         return rebased
     return value
 
 
-def _rebase_path(value: Path, source: Path, target: Path, /) -> Path:
+def _rebase_path(
+    value: pathlib.Path, source: pathlib.Path, target: pathlib.Path, /
+) -> pathlib.Path:
     if not value.is_absolute():
         return value
     resolved = value.resolve()
@@ -509,20 +560,24 @@ def _rebase_path(value: Path, source: Path, target: Path, /) -> Path:
 
 
 def _rebase_dataclass(
-    value: Any, source: Path, target: Path, active: set[int], /
+    value: Any, source: pathlib.Path, target: pathlib.Path, active: set[int], /
 ) -> object:
     updates = {
         item.name: _rebase_value(
             cast(object, getattr(value, item.name)), source, target, active
         )
-        for item in fields(value)
+        for item in dataclasses.fields(value)
         if item.init
     }
-    return cast(object, replace(value, **updates))
+    return cast(object, dataclasses.replace(value, **updates))
 
 
 def _rebase_tuple(
-    value: tuple[object, ...], source: Path, target: Path, active: set[int], /
+    value: tuple[object, ...],
+    source: pathlib.Path,
+    target: pathlib.Path,
+    active: set[int],
+    /,
 ) -> object:
     items = tuple(_rebase_value(item, source, target, active) for item in value)
     if hasattr(value, "_fields"):
@@ -533,8 +588,8 @@ def _rebase_tuple(
 
 def _rebase_mapping(
     value: Mapping[object, object],
-    source: Path,
-    target: Path,
+    source: pathlib.Path,
+    target: pathlib.Path,
     active: set[int],
     /,
 ) -> object:
@@ -542,12 +597,20 @@ def _rebase_mapping(
     for key, item in value.items():
         rebased_key = _rebase_value(key, source, target, active)
         if rebased_key in items:
-            raise ValueError("checkpoint mapping keys collide after path rebasing")
+            raise ValueError(
+                "checkpoint mapping keys collide after path rebasing"
+            )
         items[rebased_key] = _rebase_value(item, source, target, active)
-    return MappingProxyType(items) if isinstance(value, MappingProxyType) else items
+    return (
+        types.MappingProxyType(items)
+        if isinstance(value, types.MappingProxyType)
+        else items
+    )
 
 
-def _require_branchable_sessions(sessions: tuple[SessionSnapshot, ...], /) -> None:
+def _require_branchable_sessions(
+    sessions: tuple[SessionSnapshot, ...], /
+) -> None:
     unavailable = [
         session.resource_id
         for session in sessions
@@ -566,46 +629,57 @@ def fork_continuation(
     snapshot: ContinuationSnapshot,
     /,
     *,
-    run_id: RunId,
-    source_output: Path,
-    target_output: Path,
-    sessions: SessionPolicy,
+    run_id: ids.RunId,
+    source_output: pathlib.Path,
+    target_output: pathlib.Path,
+    sessions: policies.SessionPolicy,
 ) -> ContinuationSnapshot:
-    """Create a new-run continuation with run-owned paths and sessions rebased."""
-
+    """Rebase paths and sessions for a new-run continuation."""
     _validate_continuation(snapshot)
     source = source_output.resolve()
     target = target_output.resolve()
     if source == target:
         raise ValueError("a fork needs a distinct output directory")
     rebased = _rebase_value(snapshot, source, target, set())
-    if not isinstance(rebased, ContinuationSnapshot):  # pragma: no cover - invariant
+    if not isinstance(
+        rebased, ContinuationSnapshot
+    ):  # pragma: no cover - invariant
         raise TypeError("rebased checkpoint has the wrong type")
-    policy = SessionPolicy(sessions)
-    if policy is SessionPolicy.BRANCH:
+    policy = policies.SessionPolicy(sessions)
+    if policy is policies.SessionPolicy.BRANCH:
         _require_branchable_sessions(rebased.sessions)
     transformed_sessions = tuple(
-        replace(
+        dataclasses.replace(
             session,
-            provider=None if policy is SessionPolicy.FRESH else session.provider,
+            provider=None
+            if policy is policies.SessionPolicy.FRESH
+            else session.provider,
             provider_session_id=(
-                None if policy is SessionPolicy.FRESH else session.provider_session_id
+                None
+                if policy is policies.SessionPolicy.FRESH
+                else session.provider_session_id
             ),
-            access=None if policy is SessionPolicy.FRESH else session.access,
+            access=None
+            if policy is policies.SessionPolicy.FRESH
+            else session.access,
             copy_on_write=(
-                policy is SessionPolicy.BRANCH
+                policy is policies.SessionPolicy.BRANCH
                 and session.persistent
                 and session.provider_session_id is not None
                 and session.branch_supported is True
                 and not session.tainted
             ),
             branch_supported=(
-                None if policy is SessionPolicy.FRESH else session.branch_supported
+                None
+                if policy is policies.SessionPolicy.FRESH
+                else session.branch_supported
             ),
             tainted=False,
         )
         for session in rebased.sessions
     )
-    transformed = replace(rebased, run_id=run_id, sessions=transformed_sessions)
+    transformed = dataclasses.replace(
+        rebased, run_id=run_id, sessions=transformed_sessions
+    )
     _validate_continuation(transformed)
     return transformed

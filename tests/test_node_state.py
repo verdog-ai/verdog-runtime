@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
-import sys
 from types import ModuleType
 from typing import Any, ClassVar, assert_type, cast
 
@@ -14,10 +14,10 @@ from verdog_runtime.declarations import (
     NodeDefinition,
     PortDefinition,
     Python,
+    StateKey,
     SubroutineCall,
     SubroutineDefinition,
     Success,
-    StateKey,
     VisitDefinition,
     WorkflowConfiguration,
     WorkflowDefinition,
@@ -32,7 +32,9 @@ def _graph(
     state_type: object,
     implementation: object,
     /,
-) -> tuple[GraphDefinition[int, int, None, object], NodeDefinition[Any, object]]:
+) -> tuple[
+    GraphDefinition[int, int, None, object], NodeDefinition[Any, object]
+]:
     enter = PortDefinition(id=NodeId("enter"))
     exit_ = PortDefinition(id=NodeId("exit"))
     failure = PortDefinition(id=NodeId("failure"))
@@ -74,7 +76,7 @@ def _definition(
     subroutine = SubroutineDefinition(graph=graph)
     module_name = "runtime_test_node_state_entry"
     module = ModuleType(module_name)
-    setattr(module, "definition", lambda: subroutine)
+    module.__dict__["definition"] = lambda: subroutine
     sys.modules[module_name] = module
     return WorkflowDefinition(
         id=GraphId("state_workflow"),
@@ -137,16 +139,19 @@ def test_state_constructor_failure_uses_the_graph_failure_boundary(
     graph, _ = _graph(BrokenState, _preserve)
     output = tmp_path / "output"
 
-    with pytest.raises(RuntimeError, match="state constructor exploded") as caught:
+    with pytest.raises(
+        RuntimeError, match="state constructor exploded"
+    ) as caught:
         (Dispatcher().run(_definition(graph), 1, output_dir=output))
 
     assert calls == [None]
     assert any(
-        "state initialization: node=work" in note for note in caught.value.__notes__
+        "state initialization: node=work" in note
+        for note in caught.value.__notes__
     )
-    stacktrace = (
-        output / "failure" / "000001" / "stacktrace.txt"
-    ).read_text("utf-8")
+    stacktrace = (output / "failure" / "000001" / "stacktrace.txt").read_text(
+        "utf-8"
+    )
     assert "in __post_init__" in stacktrace
     assert "RuntimeError: state constructor exploded" in stacktrace
     assert "Verdog failure boundary:" in stacktrace

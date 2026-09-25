@@ -1,13 +1,15 @@
+"""Resolve project ownership and manage cancellable child processes."""
+
 from __future__ import annotations
 
+import contextlib
 import os
+import pathlib
 import signal
 import subprocess
-from contextlib import suppress
-from pathlib import Path, PurePosixPath
 from typing import TypedDict, cast
 
-from .declarations.ids import GraphId, ParameterAddress
+from verdog_runtime.declarations import ids
 
 _PROCESS_TREE_ENV = "_VERDOG_PROCESS_TREE"
 _TERMINATION_GRACE_SECONDS = 0.5
@@ -20,12 +22,11 @@ class ProcessOptions(TypedDict, total=False):
 
 def normalize_project_path(value: str, /) -> str:
     """Return one safe owner-relative path in platform-neutral form."""
-
-    relative = Path(value)
+    relative = pathlib.Path(value)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("child project path must be owner-relative")
     parts = tuple(part for part in relative.parts if part not in ("", "."))
-    return PurePosixPath(*parts).as_posix() if parts else "."
+    return pathlib.PurePosixPath(*parts).as_posix() if parts else "."
 
 
 def compose_project_path(owner: str, descendant: str, /) -> str:
@@ -38,7 +39,7 @@ def compose_project_path(owner: str, descendant: str, /) -> str:
     return f"{owner}/{descendant}"
 
 
-def normalize_parameter_address(value: object, /) -> ParameterAddress:
+def normalize_parameter_address(value: object, /) -> ids.ParameterAddress:
     parts = cast(tuple[object, ...], value) if isinstance(value, tuple) else ()
     if (
         len(parts) != 2
@@ -47,13 +48,14 @@ def normalize_parameter_address(value: object, /) -> ParameterAddress:
         or not parts[1]
     ):
         raise TypeError("a parameter address must be (project_path, GraphId)")
-    return normalize_project_path(parts[0]), GraphId(parts[1])
+    return normalize_project_path(parts[0]), ids.GraphId(parts[1])
 
 
-def resolve_project_root(root: Path, project_path: str, /) -> Path:
+def resolve_project_root(
+    root: pathlib.Path, project_path: str, /
+) -> pathlib.Path:
     """Resolve one child project without letting it escape its owner."""
-
-    relative = Path(project_path)
+    relative = pathlib.Path(project_path)
     normalize_project_path(project_path)
     owner = root.resolve()
     target = (owner / relative).resolve()
@@ -66,7 +68,6 @@ def wait_until_reaped(
     process: subprocess.Popen[bytes], /, timeout: float | None = None
 ) -> bool:
     """Reap a child within an optional caller-owned polling interval."""
-
     try:
         process.wait(timeout=None if timeout is None else max(timeout, 0.0))
     except subprocess.TimeoutExpired:
@@ -74,16 +75,19 @@ def wait_until_reaped(
     return True
 
 
-def process_options(environment: dict[str, str], /) -> tuple[ProcessOptions, bool]:
-    """Mark and isolate the outermost process in one cancellable process tree."""
-
+def process_options(
+    environment: dict[str, str], /
+) -> tuple[ProcessOptions, bool]:
+    """Mark and isolate outermost process in one cancellable process tree."""
     nested = environment.get(_PROCESS_TREE_ENV) == "1"
     environment[_PROCESS_TREE_ENV] = "1"
     options: ProcessOptions
     if os.name == "nt":
         options = {
             "creationflags": (
-                0 if nested else getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                0
+                if nested
+                else getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             )
         }
     else:
@@ -93,9 +97,8 @@ def process_options(environment: dict[str, str], /) -> tuple[ProcessOptions, boo
 
 def _posix_descendants(pid: int, /) -> tuple[int, ...]:
     """Snapshot descendants deepest-first without third-party dependencies."""
-
     children: dict[int, list[int]] = {}
-    proc_children = Path(f"/proc/{pid}/task/{pid}/children")
+    proc_children = pathlib.Path(f"/proc/{pid}/task/{pid}/children")
     if proc_children.exists():
         pending = [pid]
         seen = {pid}
@@ -104,7 +107,9 @@ def _posix_descendants(pid: int, /) -> tuple[int, ...]:
             try:
                 direct = [
                     int(item)
-                    for item in Path(f"/proc/{parent}/task/{parent}/children")
+                    for item in pathlib.Path(
+                        f"/proc/{parent}/task/{parent}/children"
+                    )
                     .read_text("ascii")
                     .split()
                 ]
@@ -152,7 +157,7 @@ def _posix_descendants(pid: int, /) -> tuple[int, ...]:
 
 def _signal_processes(pids: tuple[int, ...], signum: signal.Signals, /) -> None:
     for pid in dict.fromkeys(pids):
-        with suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signum)
 
 
@@ -163,28 +168,25 @@ def terminate_process_tree(
     owns_group: bool,
 ) -> None:
     """Stop a blocking child and every process it started, then reap it."""
-
     if process.poll() is not None:
         return
     if os.name == "nt":
-        try:
+        with contextlib.suppress(OSError):
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
             )
-        except OSError:
-            pass
         if process.poll() is None:
-            with suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError):
                 process.kill()
         wait_until_reaped(process)
         return
 
     descendants = _posix_descendants(process.pid)
     if owns_group:
-        with suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGTERM)
     else:
         _signal_processes((*descendants, process.pid), signal.SIGTERM)
@@ -192,7 +194,7 @@ def terminate_process_tree(
         wait_until_reaped(process, _TERMINATION_GRACE_SECONDS)
     finally:
         if owns_group:
-            with suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             _signal_processes(descendants, signal.SIGKILL)
         else:
@@ -207,5 +209,5 @@ def cleanup_after_interruption(
     *,
     owns_group: bool,
 ) -> None:
-    with suppress(BaseException):
+    with contextlib.suppress(BaseException):
         terminate_process_tree(process, owns_group=owns_group)

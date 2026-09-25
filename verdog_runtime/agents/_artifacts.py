@@ -1,12 +1,19 @@
+"""Persist provider prompts, responses, and diagnostic artifacts."""
+
 from __future__ import annotations
 
 import json
 
-from ..declarations.agents import AgentRequest
-from ..declarations.ids import ProviderSessionId
+from verdog_runtime.declarations import agents as agent_declarations
+from verdog_runtime.declarations import ids
 
 
-def begin(request: AgentRequest, provider: str, model: str | None, /) -> None:
+def begin(
+    request: agent_declarations.AgentRequest,
+    provider: str,
+    model: str | None,
+    /,
+) -> None:
     metadata(
         request,
         provider,
@@ -19,7 +26,7 @@ def begin(request: AgentRequest, provider: str, model: str | None, /) -> None:
 
 
 def complete(
-    request: AgentRequest,
+    request: agent_declarations.AgentRequest,
     provider: str,
     model: str | None,
     reasoning: str,
@@ -27,7 +34,7 @@ def complete(
     *,
     duration_seconds: float,
     returncode: int,
-    provider_session_id: ProviderSessionId | None,
+    provider_session_id: ids.ProviderSessionId | None,
 ) -> None:
     if reasoning:
         (request.artifact_dir / "reasoning.txt").write_text(reasoning, "utf-8")
@@ -43,7 +50,7 @@ def complete(
 
 
 def metadata(
-    request: AgentRequest,
+    request: agent_declarations.AgentRequest,
     provider: str,
     model: str | None,
     /,
@@ -51,7 +58,7 @@ def metadata(
     status: str,
     duration_seconds: float | None,
     returncode: int | None,
-    provider_session_id: ProviderSessionId | None,
+    provider_session_id: ids.ProviderSessionId | None,
 ) -> None:
     value = {
         "status": status,
@@ -80,5 +87,7 @@ def metadata(
 
 
 def failure_detail(stderr: str, events: str, /) -> str:
-    detail = (stderr.strip() or events.strip() or "no diagnostic output")[-2000:]
+    detail = (stderr.strip() or events.strip() or "no diagnostic output")[
+        -2000:
+    ]
     return detail

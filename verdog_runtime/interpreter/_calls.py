@@ -1,18 +1,13 @@
+"""Resolve child definitions and track lexical scope and transition budgets."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from pathlib import Path
+import dataclasses
+import pathlib
 from typing import TypeVar
 
-from .._definitions import load_definition
-from .._process import normalize_project_path, resolve_project_root
-from ..declarations import (
-    SubroutineCall,
-    SubroutineDefinition,
-    WorkflowCall,
-    WorkflowDefinition,
-)
-from ..declarations.ids import EdgeId, GraphId, NodeId, is_valid_definition_id
+from verdog_runtime import _definitions, _process, declarations
+from verdog_runtime.declarations import ids
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -24,7 +19,7 @@ class Budget:
     def __init__(self, limit: int) -> None:
         self.remaining = limit
 
-    def consume(self, edge_id: EdgeId) -> None:
+    def consume(self, edge_id: ids.EdgeId) -> None:
         if self.remaining <= 0:
             error = RuntimeError(
                 "workflow transition limit exceeded [transition_limit]"
@@ -34,27 +29,27 @@ class Budget:
         self.remaining -= 1
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class CallScope:
-    current: GraphId
-    root: GraphId
-    root_workflow_id: GraphId | None = None
+    current: ids.GraphId
+    root: ids.GraphId
+    root_workflow_id: ids.GraphId | None = None
 
 
-def _definition_path(definition_id: GraphId, /) -> tuple[str, str]:
+def _definition_path(definition_id: ids.GraphId, /) -> tuple[str, str]:
     package, separator, local = str(definition_id).rpartition(".")
-    if not is_valid_definition_id(local):
+    if not ids.is_valid_definition_id(local):
         raise ValueError(f"invalid definition id: {definition_id}")
     return (package if separator else ""), local
 
 
-def _root_definition_id(definition_id: GraphId, /) -> GraphId:
+def _root_definition_id(definition_id: ids.GraphId, /) -> ids.GraphId:
     package, local = _definition_path(definition_id)
     root = local.split("__", 1)[0]
-    return GraphId(f"{package}.{root}" if package else root)
+    return ids.GraphId(f"{package}.{root}" if package else root)
 
 
-def _visible(scope: CallScope, definition_id: GraphId, /) -> bool:
+def _visible(scope: CallScope, definition_id: ids.GraphId, /) -> bool:
     target_package, target = _definition_path(definition_id)
     current_package, current = _definition_path(scope.current)
     if target_package != current_package:
@@ -71,41 +66,54 @@ def _visible(scope: CallScope, definition_id: GraphId, /) -> bool:
 
 
 def local_subroutine(
-    project_root: Path, scope: CallScope, operation: SubroutineCall, /
-) -> tuple[SubroutineDefinition[object, object, object, object], CallScope]:
+    project_root: pathlib.Path,
+    scope: CallScope,
+    operation: declarations.SubroutineCall,
+    /,
+) -> tuple[
+    declarations.SubroutineDefinition[object, object, object, object], CallScope
+]:
     if not _visible(scope, operation.definition_id):
         raise LookupError(
-            f"subroutine call target is not lexically visible: {operation.definition_id}"
+            f"subroutine call target is not lexically visible: "
+            f"{operation.definition_id}"
         )
     child = _load_subroutine(project_root, operation)
-    return child, replace(scope, current=child.graph.id)
+    return child, dataclasses.replace(scope, current=child.graph.id)
 
 
-def require_local_workflow(scope: CallScope, operation: WorkflowCall, /) -> None:
+def require_local_workflow(
+    scope: CallScope, operation: declarations.WorkflowCall, /
+) -> None:
     if operation.definition_id != scope.root_workflow_id and not _visible(
         scope, operation.definition_id
     ):
         raise LookupError(
-            f"workflow call target is not lexically visible: {operation.definition_id}"
+            f"workflow call target is not lexically visible: "
+            f"{operation.definition_id}"
         )
 
 
 def subroutine_scope(
-    project_root: Path, operation: SubroutineCall, /
-) -> tuple[CallScope, SubroutineDefinition[object, object, object, object]]:
+    project_root: pathlib.Path, operation: declarations.SubroutineCall, /
+) -> tuple[
+    CallScope, declarations.SubroutineDefinition[object, object, object, object]
+]:
     target = _load_subroutine(project_root, operation)
-    return CallScope(target.graph.id, _root_definition_id(target.graph.id)), target
+    return CallScope(
+        target.graph.id, _root_definition_id(target.graph.id)
+    ), target
 
 
 def _load_subroutine(
-    project_root: Path,
-    operation: SubroutineCall,
+    project_root: pathlib.Path,
+    operation: declarations.SubroutineCall,
     /,
-) -> SubroutineDefinition[object, object, object, object]:
-    definition_type: type[SubroutineDefinition[object, object, object, object]] = (
-        SubroutineDefinition
-    )
-    target, _ = load_definition(
+) -> declarations.SubroutineDefinition[object, object, object, object]:
+    definition_type: type[
+        declarations.SubroutineDefinition[object, object, object, object]
+    ] = declarations.SubroutineDefinition
+    target, _ = _definitions.load_definition(
         project_root,
         operation.definition_module,
         operation.definition_id,
@@ -116,7 +124,9 @@ def _load_subroutine(
 
 
 def workflow_scope(
-    definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
+    definition: declarations.WorkflowDefinition[
+        InputT, OutputT, ParamsT, ScopeT
+    ],
     /,
 ) -> CallScope:
     root = definition.entry.definition_id
@@ -124,26 +134,34 @@ def workflow_scope(
 
 
 def workflow_subroutine(
-    project_root: Path,
-    definition: WorkflowDefinition[InputT, OutputT, ParamsT, ScopeT],
+    project_root: pathlib.Path,
+    definition: declarations.WorkflowDefinition[
+        InputT, OutputT, ParamsT, ScopeT
+    ],
     /,
-) -> tuple[SubroutineDefinition[object, object, object, object], CallScope]:
-    if normalize_project_path(definition.entry.project_path) != ".":
+) -> tuple[
+    declarations.SubroutineDefinition[object, object, object, object], CallScope
+]:
+    if _process.normalize_project_path(definition.entry.project_path) != ".":
         raise ValueError("workflow entry subroutine must be local")
-    return local_subroutine(project_root, workflow_scope(definition), definition.entry)
+    return local_subroutine(
+        project_root, workflow_scope(definition), definition.entry
+    )
 
 
 def resolve_call_project(
-    project_root: Path,
+    project_root: pathlib.Path,
     project_path: str,
-    node_id: NodeId,
+    node_id: ids.NodeId,
     /,
-) -> tuple[str, Path]:
+) -> tuple[str, pathlib.Path]:
     try:
         return (
-            normalize_project_path(project_path),
-            resolve_project_root(project_root, project_path),
+            _process.normalize_project_path(project_path),
+            _process.resolve_project_root(project_root, project_path),
         )
     except ValueError as error:
-        error.add_note(f"Verdog child project for call node {node_id} is invalid")
+        error.add_note(
+            f"Verdog child project for call node {node_id} is invalid"
+        )
         raise

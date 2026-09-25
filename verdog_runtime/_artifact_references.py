@@ -1,18 +1,16 @@
-"""Reference immutable run artifacts without copying them at checkpoint boundaries."""
+"""Reference immutable run artifacts without copying checkpoint files."""
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
+import pathlib
 import stat
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, TypeAlias, cast
 
-from ._run_metadata import FileSignature, file_signature, fsync_directory
-from ._run_model import CONTROL_DIRECTORY, RunStoreError
-from ._relative_path import strict_posix_relative_parts
+from verdog_runtime import _relative_path, _run_metadata, _run_model
 
 _ARTIFACT_REFERENCES_VERSION = 1
 _COPY_CHUNK_SIZE = 1024 * 1024
@@ -20,15 +18,15 @@ _FICLONE = 0x40049409
 _INVOCATION_METADATA = ".verdog-invocation.json"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ArtifactDirectory:
-    relative: Path
+    relative: pathlib.Path
     mode: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class ArtifactFile:
-    relative: Path
+    relative: pathlib.Path
     mode: int
     size: int
     sha256: str
@@ -37,40 +35,45 @@ class ArtifactFile:
 ArtifactReferences: TypeAlias = tuple[
     tuple[ArtifactDirectory, ...], tuple[ArtifactFile, ...]
 ]
-ArtifactCache: TypeAlias = dict[Path, tuple[FileSignature, ArtifactFile]]
+ArtifactCache: TypeAlias = dict[
+    pathlib.Path, tuple[_run_metadata.FileSignature, ArtifactFile]
+]
 
 
-def _artifact_relative(name: str) -> Path:
-    parts = strict_posix_relative_parts(name)
-    if parts is None or CONTROL_DIRECTORY in parts:
-        raise RunStoreError(
+def _artifact_relative(name: str) -> pathlib.Path:
+    parts = _relative_path.strict_posix_relative_parts(name)
+    if parts is None or _run_model.CONTROL_DIRECTORY in parts:
+        raise _run_model.RunStoreError(
             f"unsafe checkpoint artifact path: {name or '<empty>'}",
             code="checkpoint.artifact_unsafe",
             details={"path": name},
         )
-    return Path(*parts)
+    return pathlib.Path(*parts)
 
 
 def _artifact_mode(value: os.stat_result) -> int:
     return stat.S_IMODE(value.st_mode) & 0o777
 
 
-def _integrity_error(relative: Path) -> None:
-    raise RunStoreError(
-        f"checkpoint artifact failed its integrity check: {relative.as_posix()}",
+def _integrity_error(relative: pathlib.Path) -> None:
+    raise _run_model.RunStoreError(
+        "checkpoint artifact failed its integrity check: "
+        f"{relative.as_posix()}",
         code="checkpoint.artifact_corrupt",
         details={"path": relative.as_posix()},
     )
 
 
-def _artifact_path(root: Path, relative: Path, *, directory: bool) -> Path:
+def _artifact_path(
+    root: pathlib.Path, relative: pathlib.Path, *, directory: bool
+) -> pathlib.Path:
     target = root.joinpath(*relative.parts)
     try:
         canonical_root = root.resolve(strict=True)
         resolved = target.resolve(strict=True)
         mode = target.lstat().st_mode
     except OSError as error:
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint artifact is unavailable: {relative.as_posix()}",
             code="checkpoint.artifact_unavailable",
             details={"path": relative.as_posix()},
@@ -81,7 +84,7 @@ def _artifact_path(root: Path, relative: Path, *, directory: bool) -> Path:
         or not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode))
         or resolved != canonical_root.joinpath(*relative.parts)
     ):
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint artifact is unsafe: {relative.as_posix()}",
             code="checkpoint.artifact_unsafe",
             details={"path": relative.as_posix()},
@@ -89,49 +92,57 @@ def _artifact_path(root: Path, relative: Path, *, directory: bool) -> Path:
     return resolved
 
 
-def _artifact_file_path(root: Path, relative: Path) -> Path:
+def _artifact_file_path(
+    root: pathlib.Path, relative: pathlib.Path
+) -> pathlib.Path:
     return _artifact_path(root, relative, directory=False)
 
 
 def _scan_artifacts(
-    root: Path,
-) -> tuple[dict[Path, FileSignature], dict[Path, FileSignature]]:
-    _artifact_path(root, Path(), directory=True)
-    directories: dict[Path, FileSignature] = {}
-    files: dict[Path, FileSignature] = {}
-    pending = [Path()]
+    root: pathlib.Path,
+) -> tuple[
+    dict[pathlib.Path, _run_metadata.FileSignature],
+    dict[pathlib.Path, _run_metadata.FileSignature],
+]:
+    _artifact_path(root, pathlib.Path(), directory=True)
+    directories: dict[pathlib.Path, _run_metadata.FileSignature] = {}
+    files: dict[pathlib.Path, _run_metadata.FileSignature] = {}
+    pending = [pathlib.Path()]
     while pending:
         base = pending.pop()
         directory = root / base
         try:
             with os.scandir(directory) as scan:
                 entries = sorted(scan, key=lambda item: item.name)
-            report_directory = base == Path() or any(
+            report_directory = base == pathlib.Path() or any(
                 entry.name == _INVOCATION_METADATA for entry in entries
             )
             for entry in entries:
-                if entry.name == CONTROL_DIRECTORY:
+                if entry.name == _run_model.CONTROL_DIRECTORY:
                     continue
                 if report_directory and entry.name in ("config.md", "stats.md"):
                     continue
-                if base == Path() and entry.name == "trace.log":
+                if base == pathlib.Path() and entry.name == "trace.log":
                     continue
                 relative = _artifact_relative((base / entry.name).as_posix())
                 metadata = entry.stat(follow_symlinks=False)
-                signature = file_signature(metadata)
+                signature = _run_metadata.file_signature(metadata)
                 if stat.S_ISDIR(metadata.st_mode):
                     directories[relative] = signature
                     pending.append(relative)
                 elif stat.S_ISREG(metadata.st_mode):
                     files[relative] = signature
                 else:
-                    raise RunStoreError(
-                        f"artifact is not a regular file or directory: {root / relative}",
+                    raise _run_model.RunStoreError(
+                        (
+                            f"artifact is not a regular file or directory: "
+                            f"{root / relative}"
+                        ),
                         code="checkpoint.artifact_unsafe",
                         details={"path": str(root / relative)},
                     )
         except OSError as error:
-            raise RunStoreError(
+            raise _run_model.RunStoreError(
                 f"artifact directory changed while checkpointing: {directory}",
                 code="checkpoint.artifact_unstable",
                 details={"path": str(directory)},
@@ -140,24 +151,32 @@ def _scan_artifacts(
 
 
 def _read_artifact(
-    root: Path, relative: Path, signature: FileSignature, *, flush: bool
+    root: pathlib.Path,
+    relative: pathlib.Path,
+    signature: _run_metadata.FileSignature,
+    *,
+    flush: bool,
 ) -> ArtifactFile:
     path = _artifact_file_path(root, relative)
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(descriptor, "rb") as stream:
-            if file_signature(os.fstat(stream.fileno())) != signature:
+            if (
+                _run_metadata.file_signature(os.fstat(stream.fileno()))
+                != signature
+            ):
                 _integrity_error(relative)
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
             if flush:
                 os.fsync(stream.fileno())
             if (
-                file_signature(os.fstat(stream.fileno())) != signature
-                or file_signature(path.lstat()) != signature
+                _run_metadata.file_signature(os.fstat(stream.fileno()))
+                != signature
+                or _run_metadata.file_signature(path.lstat()) != signature
             ):
                 _integrity_error(relative)
     except OSError as error:
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint artifact is unreadable: {relative.as_posix()}",
             code="checkpoint.artifact_unavailable",
             details={"path": relative.as_posix()},
@@ -188,10 +207,15 @@ def _transfer_and_hash(source: int, target: int | None) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-def _reference_mode(value: Mapping[str, Any], path: Path) -> int:
+def _reference_mode(value: Mapping[str, Any], path: pathlib.Path) -> int:
     mode = value.get("mode")
-    if not isinstance(mode, int) or isinstance(mode, bool) or mode < 0 or mode > 0o777:
-        raise RunStoreError(
+    if (
+        not isinstance(mode, int)
+        or isinstance(mode, bool)
+        or mode < 0
+        or mode > 0o777
+    ):
+        raise _run_model.RunStoreError(
             f"checkpoint artifact has an invalid mode: {path}",
             code="checkpoint.artifact_manifest_invalid",
             details={"path": str(path), "field": "mode"},
@@ -199,10 +223,12 @@ def _reference_mode(value: Mapping[str, Any], path: Path) -> int:
     return mode
 
 
-def _reference_string(value: Mapping[str, Any], key: str, path: Path) -> str:
+def _reference_string(
+    value: Mapping[str, Any], key: str, path: pathlib.Path
+) -> str:
     found = value.get(key)
     if not isinstance(found, str) or not found:
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint artifact has an invalid {key}: {path}",
             code="checkpoint.artifact_manifest_invalid",
             details={"path": str(path), "field": key},
@@ -210,10 +236,10 @@ def _reference_string(value: Mapping[str, Any], key: str, path: Path) -> str:
     return found
 
 
-def _reference_size(value: Mapping[str, Any], path: Path) -> int:
+def _reference_size(value: Mapping[str, Any], path: pathlib.Path) -> int:
     found = value.get("size")
     if not isinstance(found, int) or isinstance(found, bool) or found < 0:
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint artifact has an invalid size: {path}",
             code="checkpoint.artifact_manifest_invalid",
             details={"path": str(path), "field": "size"},
@@ -221,10 +247,12 @@ def _reference_size(value: Mapping[str, Any], path: Path) -> int:
     return found
 
 
-def _reference_records(value: Mapping[str, Any], key: str, path: Path) -> list[object]:
+def _reference_records(
+    value: Mapping[str, Any], key: str, path: pathlib.Path
+) -> list[object]:
     records = value.get(key)
     if not isinstance(records, list):
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint artifact manifest has no valid {key}: {path}",
             code="checkpoint.artifact_manifest_invalid",
             details={"path": str(path), "field": key},
@@ -233,12 +261,12 @@ def _reference_records(value: Mapping[str, Any], key: str, path: Path) -> list[o
 
 
 def _reference_directories(
-    value: Mapping[str, Any], path: Path
+    value: Mapping[str, Any], path: pathlib.Path
 ) -> tuple[ArtifactDirectory, ...]:
     found: list[ArtifactDirectory] = []
     for item in _reference_records(value, "directories", path):
         if not isinstance(item, dict):
-            raise RunStoreError(
+            raise _run_model.RunStoreError(
                 f"checkpoint artifact directory is invalid: {path}",
                 code="checkpoint.artifact_manifest_invalid",
                 details={"path": str(path)},
@@ -253,11 +281,13 @@ def _reference_directories(
     return tuple(sorted(found, key=lambda item: item.relative.as_posix()))
 
 
-def _reference_files(value: Mapping[str, Any], path: Path) -> tuple[ArtifactFile, ...]:
+def _reference_files(
+    value: Mapping[str, Any], path: pathlib.Path
+) -> tuple[ArtifactFile, ...]:
     found: list[ArtifactFile] = []
     for item in _reference_records(value, "files", path):
         if not isinstance(item, dict):
-            raise RunStoreError(
+            raise _run_model.RunStoreError(
                 f"checkpoint artifact file is invalid: {path}",
                 code="checkpoint.artifact_manifest_invalid",
                 details={"path": str(path)},
@@ -267,7 +297,7 @@ def _reference_files(value: Mapping[str, Any], path: Path) -> tuple[ArtifactFile
         if len(digest) != 64 or any(
             character not in "0123456789abcdef" for character in digest
         ):
-            raise RunStoreError(
+            raise _run_model.RunStoreError(
                 f"checkpoint artifact digest is invalid: {path}",
                 code="checkpoint.artifact_manifest_invalid",
                 details={"path": str(path), "field": "sha256"},
@@ -286,7 +316,7 @@ def _reference_files(value: Mapping[str, Any], path: Path) -> tuple[ArtifactFile
 def _validate_reference_layout(
     directories: Sequence[ArtifactDirectory],
     files: Sequence[ArtifactFile],
-    manifest_path: Path,
+    manifest_path: pathlib.Path,
 ) -> None:
     directory_paths = {item.relative for item in directories}
     file_paths = {item.relative for item in files}
@@ -295,7 +325,7 @@ def _validate_reference_layout(
         or len(file_paths) != len(files)
         or directory_paths & file_paths
     ):
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint artifact paths are ambiguous: {manifest_path}",
             code="checkpoint.artifact_manifest_invalid",
             details={"path": str(manifest_path)},
@@ -304,27 +334,30 @@ def _validate_reference_layout(
         (
             relative
             for relative in (*directory_paths, *file_paths)
-            if relative.parent != Path() and relative.parent not in directory_paths
+            if relative.parent != pathlib.Path()
+            and relative.parent not in directory_paths
         ),
         None,
     )
     if missing_parent is not None:
-        raise RunStoreError(
-            f"checkpoint artifact parent is missing: {missing_parent.as_posix()}",
+        raise _run_model.RunStoreError(
+            (
+                f"checkpoint artifact parent is missing: "
+                f"{missing_parent.as_posix()}"
+            ),
             code="checkpoint.artifact_manifest_invalid",
             details={"path": missing_parent.as_posix()},
         )
 
 
 def decode_artifact_references(
-    raw: object, manifest_path: Path, /
+    raw: object, manifest_path: pathlib.Path, /
 ) -> ArtifactReferences | None:
     """Decode artifact metadata already read from one checkpoint manifest."""
-
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint has no valid artifact references: {manifest_path}",
             code="checkpoint.artifact_manifest_invalid",
             details={"path": str(manifest_path)},
@@ -335,7 +368,7 @@ def decode_artifact_references(
         or artifact.get("schema_version") != _ARTIFACT_REFERENCES_VERSION
         or artifact.get("kind") != "references"
     ):
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             f"checkpoint has no valid artifact references: {manifest_path}",
             code="checkpoint.artifact_manifest_invalid",
             details={"path": str(manifest_path)},
@@ -349,11 +382,10 @@ def decode_artifact_references(
 def validate_artifact_extension(
     previous: ArtifactReferences | None, current: ArtifactReferences
 ) -> None:
-    """Previously published artifacts are immutable; directories may gain children."""
-
+    """Validate immutable artifacts; directories may gain children."""
     if previous is None:
         return
-    for old, new in zip(previous, current):
+    for old, new in zip(previous, current, strict=True):
         indexed = {item.relative: item for item in new}
         for item in old:
             if indexed.get(item.relative) != item:
@@ -361,47 +393,53 @@ def validate_artifact_extension(
 
 
 def capture_artifacts(
-    source_root: Path,
+    source_root: pathlib.Path,
     *,
     cache: ArtifactCache,
     previous: ArtifactReferences | None = None,
 ) -> dict[str, object]:
-    """Flush and inventory existing outputs, retaining verified hashes in ``cache``."""
-
+    """Flush and inventory outputs; retain verified hashes in ``cache``."""
     before_directories, before_files = _scan_artifacts(source_root)
     directories = tuple(
         ArtifactDirectory(relative, stat.S_IMODE(signature[2]) & 0o777)
         for relative, signature in sorted(before_directories.items())
     )
     files: list[ArtifactFile] = []
-    changed_directories: set[Path] = {Path()}
+    changed_directories: set[pathlib.Path] = {pathlib.Path()}
     for relative, signature in sorted(before_files.items()):
         cached = cache.get(relative)
         if cached is not None and cached[0] == signature:
             record = cached[1]
         else:
-            record = _read_artifact(source_root, relative, signature, flush=True)
+            record = _read_artifact(
+                source_root, relative, signature, flush=True
+            )
             cache[relative] = (signature, record)
             changed_directories.add(relative.parent)
         files.append(record)
     current = directories, tuple(files)
     validate_artifact_extension(previous, current)
     if (before_directories, before_files) != _scan_artifacts(source_root):
-        raise RunStoreError(
-            "run artifacts changed while checkpoint references were being captured",
+        raise _run_model.RunStoreError(
+            (
+                "run artifacts changed while checkpoint references were "
+                "being captured"
+            ),
             code="checkpoint.artifact_unstable",
             details={"output_dir": str(source_root)},
         )
-    previous_directories: set[Path] = (
+    previous_directories: set[pathlib.Path] = (
         set() if previous is None else {item.relative for item in previous[0]}
     )
     for record in directories:
         if record.relative not in previous_directories:
-            changed_directories.update((record.relative, record.relative.parent))
+            changed_directories.update(
+                (record.relative, record.relative.parent)
+            )
     for relative in sorted(
         changed_directories, key=lambda item: len(item.parts), reverse=True
     ):
-        fsync_directory(source_root / relative)
+        _run_metadata.fsync_directory(source_root / relative)
     return {
         "schema_version": _ARTIFACT_REFERENCES_VERSION,
         "kind": "references",
@@ -421,8 +459,10 @@ def capture_artifacts(
     }
 
 
-def _validate_directories(root: Path, directories: Sequence[ArtifactDirectory]) -> None:
-    _artifact_path(root, Path(), directory=True)
+def _validate_directories(
+    root: pathlib.Path, directories: Sequence[ArtifactDirectory]
+) -> None:
+    _artifact_path(root, pathlib.Path(), directory=True)
     for record in directories:
         path = _artifact_path(root, record.relative, directory=True)
         if _artifact_mode(path.lstat()) != record.mode:
@@ -430,16 +470,20 @@ def _validate_directories(root: Path, directories: Sequence[ArtifactDirectory]) 
 
 
 def validate_artifacts(
-    source_root: Path, references: ArtifactReferences, *, cache: ArtifactCache
+    source_root: pathlib.Path,
+    references: ArtifactReferences,
+    *,
+    cache: ArtifactCache,
 ) -> None:
-    """Verify exactly the referenced artifacts; later outputs do not invalidate them."""
-
+    """Verify referenced artifacts independently of later outputs."""
     directories, files = references
     _validate_directories(source_root, directories)
     for record in files:
         path = _artifact_file_path(source_root, record.relative)
-        signature = file_signature(path.lstat())
-        current = _read_artifact(source_root, record.relative, signature, flush=False)
+        signature = _run_metadata.file_signature(path.lstat())
+        current = _read_artifact(
+            source_root, record.relative, signature, flush=False
+        )
         if current != record:
             _integrity_error(record.relative)
         cache[record.relative] = (signature, current)
@@ -459,21 +503,28 @@ def _try_reflink(source: int, target: int) -> bool:
 
 
 def _materialize_artifact_bytes(
-    source: Path,
-    target: Path,
+    source: pathlib.Path,
+    target: pathlib.Path,
     record: ArtifactFile,
-    expected_signature: FileSignature,
+    expected_signature: _run_metadata.FileSignature,
 ) -> None:
-    source_descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    source_descriptor = os.open(
+        source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        if file_signature(os.fstat(source_descriptor)) != expected_signature:
-            raise RunStoreError(
+        if (
+            _run_metadata.file_signature(os.fstat(source_descriptor))
+            != expected_signature
+        ):
+            raise _run_model.RunStoreError(
                 "checkpoint artifact changed during materialization: "
                 f"{record.relative.as_posix()}",
                 code="checkpoint.artifact_corrupt",
                 details={"path": record.relative.as_posix()},
             )
-        target_descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        target_descriptor = os.open(
+            target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
         try:
             cloned = _try_reflink(source_descriptor, target_descriptor)
             size, digest = _transfer_and_hash(
@@ -482,14 +533,15 @@ def _materialize_artifact_bytes(
             os.fsync(target_descriptor)
         finally:
             os.close(target_descriptor)
-        current_signature = file_signature(source.lstat())
+        current_signature = _run_metadata.file_signature(source.lstat())
         if (
-            file_signature(os.fstat(source_descriptor)) != expected_signature
+            _run_metadata.file_signature(os.fstat(source_descriptor))
+            != expected_signature
             or current_signature != expected_signature
             or size != record.size
             or digest != record.sha256
         ):
-            raise RunStoreError(
+            raise _run_model.RunStoreError(
                 "checkpoint artifact failed its integrity check: "
                 f"{record.relative.as_posix()}",
                 code="checkpoint.artifact_corrupt",
@@ -500,22 +552,22 @@ def _materialize_artifact_bytes(
 
 
 def _copy_referenced_artifact(
-    source_root: Path, record: ArtifactFile, target: Path
+    source_root: pathlib.Path, record: ArtifactFile, target: pathlib.Path
 ) -> None:
     source = _artifact_file_path(source_root, record.relative)
     metadata = source.lstat()
     if _artifact_mode(metadata) != record.mode:
         _integrity_error(record.relative)
-    expected_signature = file_signature(metadata)
+    expected_signature = _run_metadata.file_signature(metadata)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         _materialize_artifact_bytes(source, target, record, expected_signature)
-    except RunStoreError:
+    except _run_model.RunStoreError:
         target.unlink(missing_ok=True)
         raise
     except OSError as error:
         target.unlink(missing_ok=True)
-        raise RunStoreError(
+        raise _run_model.RunStoreError(
             "checkpoint artifact could not be materialized: "
             f"{record.relative.as_posix()}",
             code="checkpoint.artifact_unavailable",
@@ -525,13 +577,15 @@ def _copy_referenced_artifact(
 
 
 def materialize_artifact_references(
-    source_root: Path,
-    destination: Path,
+    source_root: pathlib.Path,
+    destination: pathlib.Path,
     directories: Sequence[ArtifactDirectory],
     files: Sequence[ArtifactFile],
 ) -> None:
     _validate_directories(source_root, directories)
-    for record in sorted(directories, key=lambda item: len(item.relative.parts)):
+    for record in sorted(
+        directories, key=lambda item: len(item.relative.parts)
+    ):
         destination.joinpath(*record.relative.parts).mkdir(mode=0o700)
     for record in files:
         _copy_referenced_artifact(
@@ -543,6 +597,6 @@ def materialize_artifact_references(
         directories, key=lambda item: len(item.relative.parts), reverse=True
     ):
         directory = destination.joinpath(*record.relative.parts)
-        fsync_directory(directory)
+        _run_metadata.fsync_directory(directory)
         directory.chmod(record.mode)
-    fsync_directory(destination)
+    _run_metadata.fsync_directory(destination)

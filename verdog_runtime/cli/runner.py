@@ -2,37 +2,34 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
+import pathlib
 import subprocess
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
-from .._lifecycle import (
-    ArgumentMode,
-    LifecycleCommand,
-    Operation,
-    SessionMode,
-    encode_lifecycle_command,
-)
-from .local import Clone, WorkspaceError, interpreter_in
-from .sync import require_current_environment
+from verdog_runtime import _lifecycle
+from verdog_runtime.cli import local, sync
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class LifecycleRequest:
-    operation: Operation
-    source: Path
+    """A resume, restart, or fork request for an isolated workflow process."""
+
+    operation: _lifecycle.Operation
+    source: pathlib.Path
     workflow_id: str
-    sessions: SessionMode
+    sessions: _lifecycle.SessionMode
     checkpoint: int | None = None
     arguments: tuple[str, ...] = ()
-    arguments_mode: ArgumentMode = "checkpoint"
+    arguments_mode: _lifecycle.ArgumentMode = "checkpoint"
     retry_incomplete: bool = False
     as_json: bool = False
 
 
-def _isolated_environment(environment: Path, interpreter: Path, /) -> dict[str, str]:
+def _isolated_environment(
+    environment: pathlib.Path, interpreter: pathlib.Path, /
+) -> dict[str, str]:
     process_environment = os.environ.copy()
     process_environment.pop("PYTHONHOME", None)
     process_environment.pop("PYTHONPATH", None)
@@ -46,13 +43,13 @@ def _isolated_environment(environment: Path, interpreter: Path, /) -> dict[str, 
 
 
 def _runtime(
-    clone: Clone, workflow_id: str | None, /
-) -> tuple[str, str, Path, dict[str, str]]:
+    clone: local.Clone, workflow_id: str | None, /
+) -> tuple[str, str, pathlib.Path, dict[str, str]]:
     workflow = clone.workflow_definition(workflow_id)
-    environment = require_current_environment(clone, workflow)
-    interpreter = interpreter_in(environment)
+    environment = sync.require_current_environment(clone, workflow)
+    interpreter = local.interpreter_in(environment)
     if interpreter is None:
-        raise WorkspaceError(
+        raise local.WorkspaceError(
             f"{environment} has no Python interpreter; run `verdog sync`"
         )
     return (
@@ -64,17 +61,16 @@ def _runtime(
 
 
 def run(
-    clone: Clone,
-    output_dir: Path | None = None,
+    clone: local.Clone,
+    output_dir: pathlib.Path | None = None,
     *,
     workflow_id: str | None = None,
     arguments: tuple[str, ...] = (),
     checkpointing: Literal["off", "auto", "required"] = "auto",
 ) -> int:
     """Trampoline into one workflow definition's own interpreter."""
-
-    definition_id, definition_module, interpreter, process_environment = _runtime(
-        clone, workflow_id
+    definition_id, definition_module, interpreter, process_environment = (
+        _runtime(clone, workflow_id)
     )
     requested = "" if output_dir is None else str(output_dir.resolve())
     return subprocess.run(  # noqa: S603 - fixed argv, no shell
@@ -96,16 +92,15 @@ def run(
 
 
 def operate(
-    clone: Clone,
+    clone: local.Clone,
     request: LifecycleRequest,
     /,
 ) -> int:
     """Trampoline a run lifecycle operation into its workflow environment."""
-
-    definition_id, definition_module, interpreter, process_environment = _runtime(
-        clone, request.workflow_id
+    definition_id, definition_module, interpreter, process_environment = (
+        _runtime(clone, request.workflow_id)
     )
-    lifecycle = LifecycleCommand(
+    lifecycle = _lifecycle.LifecycleCommand(
         operation=request.operation,
         root=clone.root.resolve(),
         definition_id=definition_id,
@@ -123,7 +118,7 @@ def operate(
         "-m",
         "verdog_runtime.entry",
         "--verdog-lifecycle",
-        encode_lifecycle_command(lifecycle),
+        _lifecycle.encode_lifecycle_command(lifecycle),
     ]
     return subprocess.run(  # noqa: S603 - fixed interpreter and argv, no shell
         command,

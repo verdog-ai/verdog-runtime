@@ -1,9 +1,9 @@
 """Markdown formatting shared by invocation reports."""
 
+import html
 from collections.abc import Iterable
-from html import escape
 
-from tabulate import tabulate
+import tabulate
 
 
 def format_cell(value: object) -> str:
@@ -12,7 +12,7 @@ def format_cell(value: object) -> str:
     except Exception:
         rendered = f"[unprintable {type(value).__name__}]"
     return (
-        escape(rendered, quote=False)
+        html.escape(rendered, quote=False)
         .replace("|", "&#124;")
         .replace("\r\n", "\n")
         .replace("\r", "\n")
@@ -20,8 +20,10 @@ def format_cell(value: object) -> str:
     )
 
 
-def format_table(rows: Iterable[Iterable[object]], headers: tuple[str, ...]) -> str:
-    return tabulate(
+def format_table(
+    rows: Iterable[Iterable[object]], headers: tuple[str, ...]
+) -> str:
+    return tabulate.tabulate(
         (tuple(format_cell(cell) for cell in row) for row in rows),
         headers=headers,
         tablefmt="pipe",

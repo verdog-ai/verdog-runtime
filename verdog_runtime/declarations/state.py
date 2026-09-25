@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import types
 from collections.abc import Iterable, Mapping
-from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast, override
 
-from .graph import FeatureDefinition
-from .keys import StateKey
-
+from verdog_runtime.declarations import graph as graph_declarations
+from verdog_runtime.declarations import keys
 
 StateT = TypeVar("StateT")
 ScopeT = TypeVar("ScopeT")
@@ -16,7 +15,7 @@ FeatureValueT = TypeVar("FeatureValueT", bound=bool | int | float | str)
 
 
 def _require_feature(key: object, /) -> None:
-    if not isinstance(key, FeatureDefinition):
+    if not isinstance(key, graph_declarations.FeatureDefinition):
         raise TypeError("FeatureState.replace key must be FeatureDefinition")
 
 
@@ -24,14 +23,15 @@ class WorkflowState(Generic[ScopeT]):
     """An immutable, structurally shared view of every entity's state."""
 
     __slots__ = ("_states", "_universe")
-    _states: Mapping[int, tuple[StateKey[Any, ScopeT], object]]
+    _states: Mapping[int, tuple[keys.StateKey[Any, ScopeT], object]]
     _universe: object
 
     def __init__(self) -> None:
+        """Create an empty universe with no declaration keys."""
         object.__setattr__(
             self,
             "_states",
-            MappingProxyType({}),
+            types.MappingProxyType({}),
         )
         object.__setattr__(self, "_universe", object())
 
@@ -42,41 +42,48 @@ class WorkflowState(Generic[ScopeT]):
     @classmethod
     def _from_states(
         cls,
-        states: Mapping[int, tuple[StateKey[Any, ScopeT], object]],
+        states: Mapping[int, tuple[keys.StateKey[Any, ScopeT], object]],
         universe: object,
         /,
     ) -> WorkflowState[ScopeT]:
         value = cls()
-        object.__setattr__(value, "_states", MappingProxyType(dict(states)))
+        object.__setattr__(
+            value, "_states", types.MappingProxyType(dict(states))
+        )
         object.__setattr__(value, "_universe", universe)
         return value
 
     @classmethod
     def _initial(
         cls,
-        values: Iterable[tuple[StateKey[Any, ScopeT], object]],
+        values: Iterable[tuple[keys.StateKey[Any, ScopeT], object]],
         /,
     ) -> WorkflowState[ScopeT]:
-        states: dict[int, tuple[StateKey[Any, ScopeT], object]] = {}
+        states: dict[int, tuple[keys.StateKey[Any, ScopeT], object]] = {}
         for owner, value in values:
             key = id(owner)
             if key in states:
-                raise ValueError(f"duplicate workflow state owner: {owner.state_key}")
+                raise ValueError(
+                    f"duplicate workflow state owner: {owner.state_key}"
+                )
             states[key] = owner, value
         return cls._from_states(states, object())
 
-    def get(self, key: StateKey[StateT, ScopeT], /) -> StateT:
+    def get(self, key: keys.StateKey[StateT, ScopeT], /) -> StateT:
+        """Return value for this exact declaration key, or raise KeyError."""
         try:
             stored_key, value = self._states[id(key)]
             if stored_key is not key:
                 raise KeyError
             return cast(StateT, value)
         except KeyError as error:
-            raise KeyError(f"unknown workflow state key: {key.state_key}") from error
+            raise KeyError(
+                f"unknown workflow state key: {key.state_key}"
+            ) from error
 
     def _replace(
         self,
-        key: StateKey[StateT, ScopeT],
+        key: keys.StateKey[StateT, ScopeT],
         value: StateT,
         /,
     ) -> WorkflowState[ScopeT]:
@@ -92,14 +99,13 @@ class WorkflowState(Generic[ScopeT]):
 
     def _changes(
         self, other: WorkflowState[ScopeT], /
-    ) -> tuple[StateKey[Any, ScopeT], ...]:
-        """Return keys whose values differ, rejecting foreign state universes."""
-
+    ) -> tuple[keys.StateKey[Any, ScopeT], ...]:
+        """Return changed keys, rejecting foreign state universes."""
         if self._universe is not other._universe:
             raise ValueError("workflow state universe changed")
         if set(self._states) != set(other._states):
             raise ValueError("workflow state keys changed")
-        changed: list[StateKey[Any, ScopeT]] = []
+        changed: list[keys.StateKey[Any, ScopeT]] = []
         for identity, (key, value) in self._states.items():
             other_key, other_value = other._states[identity]
             if other_key is not key:
@@ -128,12 +134,13 @@ class WorkflowState(Generic[ScopeT]):
 
 
 class FeatureState(Generic[ScopeT]):
-    """A feature-node view that can read every slot and replace only features."""
+    """A state view that reads every slot and replaces only features."""
 
     __slots__ = ("_state",)
     _state: WorkflowState[ScopeT]
 
     def __init__(self) -> None:
+        """Create an empty feature view with no registered declaration keys."""
         object.__setattr__(self, "_state", WorkflowState[ScopeT]())
 
     @override
@@ -151,15 +158,17 @@ class FeatureState(Generic[ScopeT]):
     def _as_workflow_state(self, /) -> WorkflowState[ScopeT]:
         return self._state
 
-    def get(self, key: StateKey[StateT, ScopeT], /) -> StateT:
+    def get(self, key: keys.StateKey[StateT, ScopeT], /) -> StateT:
+        """Read a node or feature value from the underlying workflow state."""
         return self._state.get(key)
 
     def replace(
         self,
-        key: FeatureDefinition[FeatureValueT, ScopeT],
+        key: graph_declarations.FeatureDefinition[FeatureValueT, ScopeT],
         value: FeatureValueT,
         /,
     ) -> FeatureState[ScopeT]:
+        """Return a new view with one feature replaced, preserving original."""
         _require_feature(key)
         return FeatureState[ScopeT]._from_workflow_state(
             self._state._replace(  # pyright: ignore[reportPrivateUsage]

@@ -7,66 +7,71 @@ can inspect it without importing the workflow which produced it.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import hashlib
 import os
+import pathlib
 import stat
 import tempfile
+import types
+import uuid
 from collections.abc import Generator, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import replace
-from pathlib import Path
-from types import MappingProxyType
-from uuid import uuid4
 
-from ._relative_path import strict_posix_relative_parts
-from ._artifact_references import (
+from verdog_runtime._artifact_references import (
     ArtifactCache,
     ArtifactReferences,
-    capture_artifacts as _capture_artifacts,
     decode_artifact_references,
     materialize_artifact_references,
     validate_artifact_extension,
+)
+from verdog_runtime._artifact_references import (
+    capture_artifacts as _capture_artifacts,
+)
+from verdog_runtime._artifact_references import (
     validate_artifacts as _validate_artifacts,
 )
-from ._file_lock import FileLockUnavailable as _LockUnavailable
-from ._run_metadata import FileSignature, LoadedCheckpoint
-from ._run_metadata import (
-    atomic_json as _atomic_json,
-)
-from ._run_metadata import (
+from verdog_runtime._file_lock import FileLockUnavailable as _LockUnavailable
+from verdog_runtime._relative_path import strict_posix_relative_parts
+from verdog_runtime._run_metadata import (
+    FileSignature,
+    LoadedCheckpoint,
     checkpoint_directory_signature,
-    file_signature,
-    load_checkpoint,
-    latest_timestamp,
-    loaded_checkpoint_index,
-    load_run,
-)
-from ._run_metadata import (
     checkpoint_state,
     checkpoint_summaries,
+    file_signature,
+    latest_timestamp,
+    load_checkpoint,
     load_checkpoint_summary,
+    load_run,
     load_run_manifest,
+    loaded_checkpoint_index,
     register_run,
     registered_runs,
     run_is_active,
 )
-from ._run_metadata import (
+from verdog_runtime._run_metadata import (
+    atomic_json as _atomic_json,
+)
+from verdog_runtime._run_metadata import (
     exclusive_file as _exclusive_file,
 )
-from ._run_metadata import (
+from verdog_runtime._run_metadata import (
     existing_control_directory as _existing_control_directory,
 )
-from ._run_metadata import (
+from verdog_runtime._run_metadata import (
     fsync_directory as _fsync_directory,
 )
-from ._run_metadata import (
+from verdog_runtime._run_metadata import (
     remove_private_tree as _remove_private_tree,
 )
-from ._run_metadata import (
+from verdog_runtime._run_metadata import (
     validate_checkpoint_availability as _validate_checkpoint_availability,
+)
+from verdog_runtime._run_metadata import (
     validate_checkpoint_sessions as _validate_checkpoint_sessions,
 )
-from ._run_model import (
+from verdog_runtime._run_model import (
     CHECKPOINT_DIRECTORY,
     CONTROL_DIRECTORY,
     RUN_MANIFEST,
@@ -85,15 +90,17 @@ from ._run_model import (
     WorkflowIdentity,
     utc_now,
 )
-from ._run_model import (
+from verdog_runtime._run_model import (
     EMPTY_COMPATIBILITY as _EMPTY_COMPATIBILITY,
 )
-from ._run_model import (
+from verdog_runtime._run_model import (
     EMPTY_SHARDS as _EMPTY_SHARDS,
 )
 
+_EMPTY_SESSIONS = SessionState()
 
-def _shard_relative(name: str) -> Path:
+
+def _shard_relative(name: str) -> pathlib.Path:
     parts = strict_posix_relative_parts(name)
     if parts is None:
         raise RunStoreError(
@@ -101,10 +108,10 @@ def _shard_relative(name: str) -> Path:
             code="checkpoint.shard_invalid",
             details={"name": name},
         )
-    return Path(*parts)
+    return pathlib.Path(*parts)
 
 
-def _write_binary(path: Path, value: bytes) -> None:
+def _write_binary(path: pathlib.Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with path.open("xb") as stream:
         stream.write(value)
@@ -124,7 +131,7 @@ def _shard_bytes(value: object, name: str, /) -> bytes:
 
 
 def _write_checkpoint_stage(
-    staged: Path,
+    staged: pathlib.Path,
     summary: CheckpointSummary,
     shards: Mapping[str, bytes],
     *,
@@ -156,7 +163,9 @@ def _write_checkpoint_stage(
         },
     )
     directories = {shard_root}
-    directories.update(path.parent for path in shard_root.rglob("*") if path.is_file())
+    directories.update(
+        path.parent for path in shard_root.rglob("*") if path.is_file()
+    )
     for directory in sorted(
         directories, key=lambda path: len(path.parts), reverse=True
     ):
@@ -167,7 +176,7 @@ def _write_checkpoint_stage(
 class RunStore:
     """The mutable, atomic metadata wrapper for one local run."""
 
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: pathlib.Path) -> None:
         self.output_dir = output_dir.resolve()
         self.control_dir = self.output_dir / CONTROL_DIRECTORY
         self._checkpoint_cache: dict[int, LoadedCheckpoint] = {}
@@ -180,9 +189,9 @@ class RunStore:
     @classmethod
     def create(
         cls,
-        output_dir: Path,
+        output_dir: pathlib.Path,
         *,
-        project_root: Path,
+        project_root: pathlib.Path,
         workflow_id: str,
         definition_id: str,
         module: str,
@@ -210,7 +219,7 @@ class RunStore:
         control.mkdir(mode=0o700)
         (control / CHECKPOINT_DIRECTORY).mkdir(mode=0o700)
         (control / "staging").mkdir(mode=0o700)
-        identifier = run_id or str(uuid4())
+        identifier = run_id or str(uuid.uuid4())
         timestamp = started_at or utc_now()
         policy = CheckpointPolicy(checkpointing)
         manifest = RunManifest(
@@ -233,7 +242,7 @@ class RunStore:
         return store
 
     @classmethod
-    def open(cls, output_dir: Path) -> RunStore:
+    def open(cls, output_dir: pathlib.Path) -> RunStore:
         store = cls(output_dir)
         store.manifest()
         return store
@@ -268,8 +277,10 @@ class RunStore:
         return True
 
     def manifest(self) -> RunManifest:
-        if self._manifest_cache_is_current():
-            assert self._manifest_cache is not None
+        if (
+            self._manifest_cache is not None
+            and self._manifest_cache_is_current()
+        ):
             return self._manifest_cache
         loaded = load_run(self.output_dir)
         self._checkpoint_cache = {
@@ -282,7 +293,7 @@ class RunStore:
         return loaded.manifest
 
     def save(self, manifest: RunManifest) -> None:
-        if Path(manifest.output_dir).resolve() != self.output_dir:
+        if pathlib.Path(manifest.output_dir).resolve() != self.output_dir:
             raise RunStoreError(
                 "cannot write a manifest for another output directory",
                 code="run.output_mismatch",
@@ -298,7 +309,7 @@ class RunStore:
         status: RunStatus | None = None,
     ) -> RunManifest:
         manifest = self.manifest()
-        updated = replace(
+        updated = dataclasses.replace(
             manifest,
             status=manifest.status if status is None else RunStatus(status),
             updated_at=utc_now(),
@@ -306,7 +317,7 @@ class RunStore:
         self.save(updated)
         return updated
 
-    @contextmanager
+    @contextlib.contextmanager
     def lease(self) -> Generator[None]:
         try:
             with _exclusive_file(self.control_dir / "lock", blocking=False):
@@ -318,7 +329,7 @@ class RunStore:
                 details={"output_dir": str(self.output_dir)},
             ) from error
 
-    def checkpoint_directory(self, sequence: int) -> Path:
+    def checkpoint_directory(self, sequence: int) -> pathlib.Path:
         if sequence <= 0:
             raise ValueError("checkpoint sequence must be positive")
         return self.control_dir / CHECKPOINT_DIRECTORY / f"{sequence:06d}"
@@ -336,9 +347,15 @@ class RunStore:
         loaded = load_checkpoint(path)
         if loaded.summary.sequence != sequence:
             raise RunStoreError(
-                f"checkpoint directory does not match its sequence: {path.parent}",
+                (
+                    f"checkpoint directory does not match its sequence: "
+                    f"{path.parent}"
+                ),
                 code="checkpoint.sequence_mismatch",
-                details={"path": str(path.parent), "sequence": loaded.summary.sequence},
+                details={
+                    "path": str(path.parent),
+                    "sequence": loaded.summary.sequence,
+                },
             )
         if cached is None:
             self._checkpoint_index_complete = False
@@ -371,7 +388,7 @@ class RunStore:
         summary: CheckpointSummary,
         *,
         shards: Mapping[str, bytes] = _EMPTY_SHARDS,
-        sessions: SessionState = SessionState(),
+        sessions: SessionState = _EMPTY_SESSIONS,
         capture_artifacts: bool = False,
         artifact_references: Mapping[str, object] | None = None,
     ) -> RunManifest:
@@ -404,7 +421,7 @@ class RunStore:
         checkpoint_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         staging_root = self.control_dir / "staging"
         staging_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        staged = Path(
+        staged = pathlib.Path(
             tempfile.mkdtemp(
                 prefix=f"checkpoint-{summary.sequence:06d}-", dir=staging_root
             )
@@ -413,18 +430,21 @@ class RunStore:
         try:
             if capture_artifacts and artifact_references is not None:
                 raise ValueError(
-                    "capture_artifacts and artifact_references are mutually exclusive"
+                    "capture_artifacts and artifact_references are "
+                    "mutually exclusive"
                 )
             if capture_artifacts:
                 artifact_references = self.capture_artifacts()
             if artifact_references is not None:
-                # A child captures at its boundary. Do not rescan its output after
-                # it has already continued executing in the other process.
+                # A child captures at its boundary. Do not rescan its output
+                # after it has continued executing in the other process.
                 references = decode_artifact_references(
                     dict(artifact_references), staged / "manifest.json"
                 )
                 assert references is not None
-                validate_artifact_extension(self._latest_artifacts(), references)
+                validate_artifact_extension(
+                    self._latest_artifacts(), references
+                )
             _write_checkpoint_stage(
                 staged,
                 summary,
@@ -451,9 +471,11 @@ class RunStore:
         committed_sessions = loaded.sessions
         if committed_sessions is None:
             raise AssertionError("a checkpoint must contain session state")
-        updated = replace(
+        updated = dataclasses.replace(
             manifest,
-            checkpoints=checkpoint_state(summaries, manifest.launch.checkpointing),
+            checkpoints=checkpoint_state(
+                summaries, manifest.launch.checkpointing
+            ),
             sessions=committed_sessions,
             updated_at=latest_timestamp(
                 (manifest.updated_at, loaded.summary.created_at)
@@ -462,9 +484,11 @@ class RunStore:
         self._manifest_cache = updated
         return updated
 
-    def checkpoint_shard_path(self, sequence: int, name: str) -> Path:
+    def checkpoint_shard_path(self, sequence: int, name: str) -> pathlib.Path:
         control = _existing_control_directory(self.output_dir)
-        shard_root = control / CHECKPOINT_DIRECTORY / f"{sequence:06d}" / "shards"
+        shard_root = (
+            control / CHECKPOINT_DIRECTORY / f"{sequence:06d}" / "shards"
+        )
         relative = _shard_relative(name)
         target = shard_root / relative
         try:
@@ -497,7 +521,7 @@ class RunStore:
         name: str,
         /,
         *,
-        path: Path | None = None,
+        path: pathlib.Path | None = None,
     ) -> bytes:
         sequence = checkpoint.summary.sequence
         try:
@@ -516,7 +540,10 @@ class RunStore:
             or integrity.sha256 != hashlib.sha256(value).hexdigest()
         ):
             raise RunStoreError(
-                f"checkpoint shard failed its integrity check: {sequence}/{name}",
+                (
+                    f"checkpoint shard failed its integrity check: "
+                    f"{sequence}/{name}"
+                ),
                 code="checkpoint.shard_corrupt",
                 details={"sequence": sequence, "name": name},
             )
@@ -530,9 +557,8 @@ class RunStore:
 
     def checkpoint_shards(self, sequence: int) -> Mapping[str, bytes]:
         """Return every integrity-checked shard in one committed checkpoint."""
-
         checkpoint = self._loaded_checkpoint(sequence)
-        return MappingProxyType(
+        return types.MappingProxyType(
             {
                 name: self._checkpoint_shard(checkpoint, name)
                 for name in checkpoint.shards
@@ -551,7 +577,6 @@ class RunStore:
 
     def capture_artifacts(self) -> dict[str, object]:
         """Capture references at the executing process's checkpoint boundary."""
-
         return _capture_artifacts(
             self.output_dir,
             cache=self._artifact_cache,
@@ -560,7 +585,6 @@ class RunStore:
 
     def validate_artifacts(self, sequence: int) -> None:
         """Verify the existing output files before resuming this checkpoint."""
-
         references = self._loaded_checkpoint(sequence).artifacts
         if references is None:
             raise RunStoreError(
@@ -568,7 +592,9 @@ class RunStore:
                 code="checkpoint.artifacts_unavailable",
                 details={"sequence": sequence},
             )
-        _validate_artifacts(self.output_dir, references, cache=self._artifact_cache)
+        _validate_artifacts(
+            self.output_dir, references, cache=self._artifact_cache
+        )
 
     def artifact_references_available(self, sequence: int) -> bool:
         checkpoint = self.checkpoint_directory(sequence)
@@ -580,9 +606,10 @@ class RunStore:
             )
         return self._loaded_checkpoint(sequence).artifacts is not None
 
-    def materialize_artifacts(self, sequence: int, destination: Path) -> Path:
-        """Atomically restore one checkpoint's run-owned files into a new output."""
-
+    def materialize_artifacts(
+        self, sequence: int, destination: pathlib.Path
+    ) -> pathlib.Path:
+        """Atomically restore checkpoint files into a new output."""
         checkpoint = self.checkpoint_directory(sequence)
         if not checkpoint.is_dir() or checkpoint.is_symlink():
             raise RunStoreError(
@@ -631,13 +658,17 @@ class RunStore:
                 )
             original_mode = stat.S_IMODE(metadata.st_mode)
         target.parent.mkdir(parents=True, exist_ok=True)
-        staged = Path(
-            tempfile.mkdtemp(prefix=f".{target.name}.artifacts-", dir=target.parent)
+        staged = pathlib.Path(
+            tempfile.mkdtemp(
+                prefix=f".{target.name}.artifacts-", dir=target.parent
+            )
         )
         committed = False
         removed_empty_target = False
         try:
-            materialize_artifact_references(self.output_dir, staged, *references)
+            materialize_artifact_references(
+                self.output_dir, staged, *references
+            )
             if existed:
                 target.rmdir()
                 removed_empty_target = True

@@ -1,46 +1,16 @@
+"""Validate graph contracts and workflow state records."""
+
 from __future__ import annotations
 
-from dataclasses import MISSING, Field, fields, is_dataclass
-from enum import Enum
-from inspect import signature
-from pathlib import PurePath
+import dataclasses
+import enum
+import inspect
+import pathlib
 from typing import Any, cast
 
-from ..declarations import (
-    Agent,
-    BooleanFeatureCondition,
-    BooleanFeatureEffect,
-    CallVisitDefinition,
-    EdgeDefinition,
-    EnumConditionObservation,
-    EnumEffectObservation,
-    EnumFeatureCondition,
-    EnumFeatureEffect,
-    Feature,
-    FeatureDefinition,
-    FeatureKind,
-    FeatureNodeDefinition,
-    GraphDefinition,
-    NumericalFeatureCondition,
-    NumericalFeatureEffect,
-    NodeDefinition,
-    PortDefinition,
-    SubroutineCall,
-    WorkflowCall,
-    WorkflowState,
-    VisitDefinition,
-)
-from ..declarations.graph import (
-    FeatureCondition,
-    FeatureEffect,
-)
-from ..declarations.ids import (
-    AgentProfileId,
-    AgentSessionId,
-    EdgeId,
-    FeatureId,
-    NodeId,
-)
+from verdog_runtime import declarations
+from verdog_runtime.declarations import graph as graph_declarations
+from verdog_runtime.declarations import ids
 
 
 def _require(condition: bool, message: str) -> None:
@@ -48,7 +18,10 @@ def _require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def require_instance(value: object, expected: type[object], message: str) -> None:
+def require_instance(
+    value: object, expected: type[object], message: str
+) -> None:
+    """Raise ValueError with the supplied message unless the type matches."""
     _require(isinstance(value, expected), message)
 
 
@@ -60,12 +33,12 @@ def require_immutable_state(
     _label: str = "workflow state",
 ) -> None:
     """Reject state values which can be mutated through a workflow snapshot."""
-
     if value is None or isinstance(
-        value, (bool, int, float, complex, str, bytes, Enum, PurePath)
+        value,
+        (bool, int, float, complex, str, bytes, enum.Enum, pathlib.PurePath),
     ):
         return
-    if isinstance(value, WorkflowState):
+    if isinstance(value, declarations.WorkflowState):
         return
     seen: set[int] = _seen if _seen is not None else set()
     if id(value) in seen:
@@ -75,8 +48,11 @@ def require_immutable_state(
         for item in cast(tuple[object, ...] | frozenset[object], value):
             require_immutable_state(item, _seen=seen, _label=_label)
         return
-    if is_dataclass(value) and getattr(type(value), "__dataclass_params__").frozen:
-        for field in fields(value):
+    if (
+        dataclasses.is_dataclass(value)
+        and getattr(type(value), "__dataclass_params__").frozen  # noqa: B009 - generated attribute absent from typeshed.
+    ):
+        for field in dataclasses.fields(value):
             require_immutable_state(
                 getattr(value, field.name), _seen=seen, _label=_label
             )
@@ -84,14 +60,16 @@ def require_immutable_state(
     raise TypeError(f"{_label} must be immutable, got {type(value).__name__}")
 
 
-def _validate_node_state_type(state_type: type[object], node_id: NodeId, /) -> None:
+def _validate_node_state_type(
+    state_type: type[object], node_id: ids.NodeId, /
+) -> None:
     label = f"entity {node_id} state type"
-    if not is_dataclass(state_type):
+    if not dataclasses.is_dataclass(state_type):
         raise TypeError(f"{label} must be a dataclass record")
     if state_type.__bases__ != (object,):
         raise TypeError(f"{label} must not inherit fields")
 
-    parameters = getattr(state_type, "__dataclass_params__")
+    parameters = getattr(state_type, "__dataclass_params__")  # noqa: B009 - generated attribute absent from typeshed.
     if not parameters.frozen:
         raise TypeError(f"{label} must be frozen")
     if not parameters.init:
@@ -99,7 +77,7 @@ def _validate_node_state_type(state_type: type[object], node_id: NodeId, /) -> N
 
     declared = tuple(getattr(state_type, "__annotations__", ()))
     all_fields = tuple(getattr(state_type, "__dataclass_fields__", ()))
-    record_fields = fields(state_type)
+    record_fields = dataclasses.fields(state_type)
     field_names = tuple(field.name for field in record_fields)
     if declared != all_fields or declared != field_names:
         raise TypeError(
@@ -108,16 +86,16 @@ def _validate_node_state_type(state_type: type[object], node_id: NodeId, /) -> N
         )
 
     slot_names = _state_slot_names(state_type)
-    if "__dict__" in state_type.__dict__ or set(slot_names) - {"__weakref__"} != set(
-        field_names
-    ):
+    if "__dict__" in state_type.__dict__ or set(slot_names) - {
+        "__weakref__"
+    } != set(field_names):
         raise TypeError(f"{label} must use slots")
 
     for record_field in record_fields:
         _validate_record_field(record_field, label)
 
     try:
-        signature(state_type).bind()
+        inspect.signature(state_type).bind()
     except (TypeError, ValueError) as error:
         raise TypeError(f"{label} must be default-constructible") from error
 
@@ -136,7 +114,9 @@ def _state_slot_names(state_type: type[object], /) -> tuple[str, ...]:
     return ()
 
 
-def _validate_record_field(record_field: Field[Any], label: str, /) -> None:
+def _validate_record_field(
+    record_field: dataclasses.Field[Any], label: str, /
+) -> None:
     field_label = f"{label} field {record_field.name}"
     if (
         not record_field.init
@@ -146,54 +126,72 @@ def _validate_record_field(record_field: Field[Any], label: str, /) -> None:
         or record_field.metadata
     ):
         raise TypeError(f"{field_label} must not customize field()")
-    if record_field.default_factory is not MISSING:
+    if record_field.default_factory is not dataclasses.MISSING:
         raise TypeError(f"{field_label} must use a direct default")
-    if record_field.default is MISSING:
+    if record_field.default is dataclasses.MISSING:
         raise TypeError(f"{field_label} must have a default")
-    require_immutable_state(record_field.default, _label=f"{field_label} default")
+    require_immutable_state(
+        record_field.default, _label=f"{field_label} default"
+    )
 
 
 def _validate_enum_condition(
-    edge_id: EdgeId,
-    reference: EnumFeatureCondition,
+    edge_id: ids.EdgeId,
+    reference: declarations.EnumFeatureCondition,
     values: tuple[str, ...],
 ) -> None:
     _require(
-        reference.observation is EnumConditionObservation.EQUAL,
-        f"edge {edge_id} enum feature {reference.feature_id} has an invalid observation",
+        reference.observation is declarations.EnumConditionObservation.EQUAL,
+        (
+            f"edge {edge_id} enum feature {reference.feature_id} has "
+            f"an invalid observation"
+        ),
     )
     _require(
         reference.value in values,
-        f"edge {edge_id} enum feature {reference.feature_id} has an unknown value",
+        (
+            f"edge {edge_id} enum feature {reference.feature_id} has "
+            f"an unknown value"
+        ),
     )
 
 
 def _validate_enum_effect(
-    edge_id: EdgeId,
-    reference: EnumFeatureEffect,
+    edge_id: ids.EdgeId,
+    reference: declarations.EnumFeatureEffect,
     values: tuple[str, ...],
 ) -> None:
     require_instance(
         reference.observation,
-        EnumEffectObservation,
-        f"edge {edge_id} enum feature {reference.feature_id} has an invalid observation",
+        declarations.EnumEffectObservation,
+        (
+            f"edge {edge_id} enum feature {reference.feature_id} has "
+            f"an invalid observation"
+        ),
     )
     _require(
         (reference.value is not None)
-        == (reference.observation is EnumEffectObservation.EQUAL),
-        f"edge {edge_id} enum feature {reference.feature_id} has an invalid value",
+        == (reference.observation is declarations.EnumEffectObservation.EQUAL),
+        (
+            f"edge {edge_id} enum feature {reference.feature_id} has "
+            f"an invalid value"
+        ),
     )
     if reference.value is not None:
         _require(
             reference.value in values,
-            f"edge {edge_id} enum feature {reference.feature_id} has an unknown value",
+            (
+                f"edge {edge_id} enum feature {reference.feature_id} "
+                f"has an unknown value"
+            ),
         )
 
 
 def _validate_feature_reference(
-    edge_id: EdgeId,
-    reference: FeatureCondition | FeatureEffect,
-    features: dict[FeatureId, FeatureDefinition[Any, Any]],
+    edge_id: ids.EdgeId,
+    reference: graph_declarations.FeatureCondition
+    | graph_declarations.FeatureEffect,
+    features: dict[ids.FeatureId, declarations.FeatureDefinition[Any, Any]],
 ) -> None:
     _require(
         reference.feature_id in features,
@@ -201,26 +199,39 @@ def _validate_feature_reference(
     )
     feature = features[reference.feature_id]
     wrong_kind = (
-        f"edge {edge_id} feature {reference.feature_id} has the wrong observation type"
+        f"edge {edge_id} feature {reference.feature_id} "
+        f"has the wrong observation type"
     )
-    if isinstance(reference, EnumFeatureCondition):
-        _require(feature.kind is FeatureKind.ENUM, wrong_kind)
+    if isinstance(reference, declarations.EnumFeatureCondition):
+        _require(feature.kind is declarations.FeatureKind.ENUM, wrong_kind)
         _validate_enum_condition(edge_id, reference, feature.values)
-    elif isinstance(reference, EnumFeatureEffect):
-        _require(feature.kind is FeatureKind.ENUM, wrong_kind)
+    elif isinstance(reference, declarations.EnumFeatureEffect):
+        _require(feature.kind is declarations.FeatureKind.ENUM, wrong_kind)
         _validate_enum_effect(edge_id, reference, feature.values)
     else:
         _require(
             (
-                feature.kind is FeatureKind.BOOLEAN
+                feature.kind is declarations.FeatureKind.BOOLEAN
                 and isinstance(
-                    reference, (BooleanFeatureCondition, BooleanFeatureEffect)
+                    reference,
+                    (
+                        declarations.BooleanFeatureCondition,
+                        declarations.BooleanFeatureEffect,
+                    ),
                 )
             )
             or (
-                feature.kind in (FeatureKind.INTEGER, FeatureKind.FLOAT)
+                feature.kind
+                in (
+                    declarations.FeatureKind.INTEGER,
+                    declarations.FeatureKind.FLOAT,
+                )
                 and isinstance(
-                    reference, (NumericalFeatureCondition, NumericalFeatureEffect)
+                    reference,
+                    (
+                        declarations.NumericalFeatureCondition,
+                        declarations.NumericalFeatureEffect,
+                    ),
                 )
             ),
             wrong_kind,
@@ -228,44 +239,65 @@ def _validate_feature_reference(
 
 
 def _validate_session(
-    session_id: AgentSessionId, name: str, sessions: set[AgentSessionId], /
+    session_id: ids.AgentSessionId,
+    name: str,
+    sessions: set[ids.AgentSessionId],
+    /,
 ) -> None:
     _require(bool(session_id), "agent session id must not be empty")
     _require(bool(name), f"agent session {session_id} name must not be empty")
-    _require(session_id not in sessions, f"duplicate agent session id: {session_id}")
+    _require(
+        session_id not in sessions, f"duplicate agent session id: {session_id}"
+    )
 
 
 def _validate_edge_visit(
-    edge: EdgeDefinition,
-    target: FeatureNodeDefinition | NodeDefinition[Any, Any] | PortDefinition,
-    source: FeatureNodeDefinition | NodeDefinition[Any, Any] | PortDefinition,
-    enter_id: NodeId,
+    edge: declarations.EdgeDefinition,
+    target: declarations.FeatureNodeDefinition
+    | declarations.NodeDefinition[Any, Any]
+    | declarations.PortDefinition,
+    source: declarations.FeatureNodeDefinition
+    | declarations.NodeDefinition[Any, Any]
+    | declarations.PortDefinition,
+    enter_id: ids.NodeId,
     /,
 ) -> None:
-    if isinstance(target, PortDefinition):
+    if isinstance(target, declarations.PortDefinition):
         _require(
             edge.visit is None,
             f"edge {edge.id} targeting a port must not declare a visit",
         )
         return
     visit = edge.visit
-    if isinstance(visit, CallVisitDefinition):
+    if isinstance(visit, declarations.CallVisitDefinition):
         _require(
-            isinstance(target, NodeDefinition)
-            and isinstance(target.operation, (SubroutineCall, WorkflowCall)),
-            f"call visit {edge.id} may only target a subroutine or workflow call node",
+            isinstance(target, declarations.NodeDefinition)
+            and isinstance(
+                target.operation,
+                (declarations.SubroutineCall, declarations.WorkflowCall),
+            ),
+            (
+                f"call visit {edge.id} may only target a subroutine "
+                f"or workflow call node"
+            ),
         )
         _require(
             callable(visit.implementation),
             f"call visit {edge.id} implementation must be callable",
         )
-    elif isinstance(visit, VisitDefinition):
+    elif isinstance(visit, declarations.VisitDefinition):
         _require(
             not (
-                isinstance(target, NodeDefinition)
-                and isinstance(target.operation, (SubroutineCall, WorkflowCall))
+                isinstance(target, declarations.NodeDefinition)
+                and isinstance(
+                    target.operation,
+                    (declarations.SubroutineCall, declarations.WorkflowCall),
+                )
             ),
-            f"edge {edge.id} targeting a call node must declare CallVisitDefinition",
+            (
+                f"edge {edge.id} targeting a call node must declare "
+                f"CallVisitDefinition"
+            ),
         )
         _require(
             callable(visit.implementation),
@@ -275,7 +307,7 @@ def _validate_edge_visit(
         raise ValueError(
             f"edge {edge.id} targeting node {target.id} must declare a visit"
         )
-    if isinstance(source, PortDefinition):
+    if isinstance(source, declarations.PortDefinition):
         _require(
             source.id == enter_id,
             f"edge {edge.id} has a terminal port source: {source.id}",
@@ -283,12 +315,19 @@ def _validate_edge_visit(
 
 
 def _graph_entities(
-    graph: GraphDefinition[Any, Any, Any, Any], /
-) -> dict[NodeId, FeatureNodeDefinition | NodeDefinition[Any, Any] | PortDefinition]:
+    graph: declarations.GraphDefinition[Any, Any, Any, Any], /
+) -> dict[
+    ids.NodeId,
+    declarations.FeatureNodeDefinition
+    | declarations.NodeDefinition[Any, Any]
+    | declarations.PortDefinition,
+]:
     entities: tuple[
         tuple[
             str,
-            FeatureNodeDefinition | NodeDefinition[Any, Any] | PortDefinition,
+            declarations.FeatureNodeDefinition
+            | declarations.NodeDefinition[Any, Any]
+            | declarations.PortDefinition,
         ],
         ...,
     ] = (
@@ -298,37 +337,47 @@ def _graph_entities(
         *(("node", node) for node in graph.nodes),
     )
     found: dict[
-        NodeId, FeatureNodeDefinition | NodeDefinition[Any, Any] | PortDefinition
+        ids.NodeId,
+        declarations.FeatureNodeDefinition
+        | declarations.NodeDefinition[Any, Any]
+        | declarations.PortDefinition,
     ] = {}
     for kind, entity in entities:
         if kind.endswith("port"):
             _require(
-                isinstance(entity, PortDefinition),
+                isinstance(entity, declarations.PortDefinition),
                 f"{kind} must be a PortDefinition",
             )
         _require(bool(entity.id), f"{kind} id must not be empty")
-        _require(entity.id not in found, f"duplicate graph entity id: {entity.id}")
+        _require(
+            entity.id not in found, f"duplicate graph entity id: {entity.id}"
+        )
         found[entity.id] = entity
-        if isinstance(entity, PortDefinition):
+        if isinstance(entity, declarations.PortDefinition):
             _require(
                 kind.endswith("port"),
                 f"graph nodes must not contain a PortDefinition: {entity.id}",
             )
             continue
-        if isinstance(entity, FeatureNodeDefinition):
+        if isinstance(entity, declarations.FeatureNodeDefinition):
             operation = cast(object, entity.operation)
             _require(
-                isinstance(operation, Feature),
+                isinstance(operation, declarations.Feature),
                 f"feature node {entity.id} must declare a Feature operation",
             )
             continue
         _validate_node_state_type(entity.state_type, entity.id)
         operation = entity.operation
         _require(
-            not isinstance(operation, Feature),
-            f"node {entity.id} must use FeatureNodeDefinition for a Feature operation",
+            not isinstance(operation, declarations.Feature),
+            (
+                f"node {entity.id} must use FeatureNodeDefinition for "
+                f"a Feature operation"
+            ),
         )
-        if isinstance(operation, (SubroutineCall, WorkflowCall)):
+        if isinstance(
+            operation, (declarations.SubroutineCall, declarations.WorkflowCall)
+        ):
             _require(
                 bool(operation.definition_id),
                 f"node {entity.id} child definition id must not be empty",
@@ -341,19 +390,27 @@ def _graph_entities(
 
 
 def _graph_features(
-    graph: GraphDefinition[Any, Any, Any, Any], /
-) -> dict[FeatureId, FeatureDefinition[Any, Any]]:
-    found: dict[FeatureId, FeatureDefinition[Any, Any]] = {}
+    graph: declarations.GraphDefinition[Any, Any, Any, Any], /
+) -> dict[ids.FeatureId, declarations.FeatureDefinition[Any, Any]]:
+    found: dict[ids.FeatureId, declarations.FeatureDefinition[Any, Any]] = {}
     for feature in graph.features:
         _require(bool(feature.id), "feature id must not be empty")
-        _require(bool(feature.label), f"feature {feature.id} label must not be empty")
+        _require(
+            bool(feature.label), f"feature {feature.id} label must not be empty"
+        )
         _require(feature.id not in found, f"duplicate feature id: {feature.id}")
-        if feature.kind is FeatureKind.ENUM:
+        if feature.kind is declarations.FeatureKind.ENUM:
             _require(
                 bool(feature.values)
-                and all(type(value) is str and bool(value) for value in feature.values)
+                and all(
+                    type(value) is str and bool(value)
+                    for value in feature.values
+                )
                 and len(feature.values) == len(set(feature.values)),
-                f"enum feature {feature.id} must have a non-empty unique string domain",
+                (
+                    f"enum feature {feature.id} must have a non-empty "
+                    f"unique string domain"
+                ),
             )
         else:
             _require(
@@ -365,24 +422,29 @@ def _graph_features(
 
 
 def _validate_graph_edges(
-    graph: GraphDefinition[Any, Any, Any, Any],
+    graph: declarations.GraphDefinition[Any, Any, Any, Any],
     entities: dict[
-        NodeId, FeatureNodeDefinition | NodeDefinition[Any, Any] | PortDefinition
+        ids.NodeId,
+        declarations.FeatureNodeDefinition
+        | declarations.NodeDefinition[Any, Any]
+        | declarations.PortDefinition,
     ],
-    features: dict[FeatureId, FeatureDefinition[Any, Any]],
+    features: dict[ids.FeatureId, declarations.FeatureDefinition[Any, Any]],
     /,
 ) -> None:
-    edge_by_id: dict[EdgeId, EdgeDefinition] = {}
+    edge_by_id: dict[ids.EdgeId, declarations.EdgeDefinition] = {}
     for edge in graph.edges:
         _require(bool(edge.id), "edge id must not be empty")
         _require(edge.id not in edge_by_id, f"duplicate edge id: {edge.id}")
         edge_by_id[edge.id] = edge
     for edge in graph.edges:
         _require(
-            edge.source in entities, f"edge {edge.id} has unknown source: {edge.source}"
+            edge.source in entities,
+            f"edge {edge.id} has unknown source: {edge.source}",
         )
         _require(
-            edge.target in entities, f"edge {edge.id} has unknown target: {edge.target}"
+            edge.target in entities,
+            f"edge {edge.id} has unknown target: {edge.target}",
         )
         _validate_edge_visit(
             edge,
@@ -392,8 +454,13 @@ def _validate_graph_edges(
         )
         if edge.effects:
             _require(
-                isinstance(entities[edge.source], FeatureNodeDefinition),
-                f"edge {edge.id} has effects but its source is not a feature node",
+                isinstance(
+                    entities[edge.source], declarations.FeatureNodeDefinition
+                ),
+                (
+                    f"edge {edge.id} has effects but its source is "
+                    f"not a feature node"
+                ),
             )
         condition_ids = [condition.feature_id for condition in edge.conditions]
         effect_ids = [effect.feature_id for effect in edge.effects]
@@ -409,7 +476,9 @@ def _validate_graph_edges(
             _validate_feature_reference(edge.id, reference, features)
 
 
-def _validate_port_routes(graph: GraphDefinition[Any, Any, Any, Any], /) -> None:
+def _validate_port_routes(
+    graph: declarations.GraphDefinition[Any, Any, Any, Any], /
+) -> None:
     _require(
         any(edge.source == graph.enter.id for edge in graph.edges),
         "enter port must have an outgoing edge",
@@ -428,8 +497,10 @@ def _validate_port_routes(graph: GraphDefinition[Any, Any, Any, Any], /) -> None
     )
 
 
-def _validate_graph_resources(graph: GraphDefinition[Any, Any, Any, Any], /) -> None:
-    profiles: set[AgentProfileId] = set()
+def _validate_graph_resources(
+    graph: declarations.GraphDefinition[Any, Any, Any, Any], /
+) -> None:
+    profiles: set[ids.AgentProfileId] = set()
     for definition in graph.profiles:
         _require(bool(definition.id), "agent profile id must not be empty")
         _require(
@@ -457,7 +528,7 @@ def _validate_graph_resources(graph: GraphDefinition[Any, Any, Any, Any], /) -> 
         )
         profiles.add(parameter.id)
 
-    sessions: set[AgentSessionId] = set()
+    sessions: set[ids.AgentSessionId] = set()
     for definition in graph.sessions:
         _validate_session(definition.id, definition.name, sessions)
         require_instance(
@@ -471,28 +542,32 @@ def _validate_graph_resources(graph: GraphDefinition[Any, Any, Any, Any], /) -> 
         sessions.add(parameter.id)
 
     for node in graph.nodes:
-        if not isinstance(node.operation, Agent):
+        if not isinstance(node.operation, declarations.Agent):
             continue
         operation = node.operation
         _require(
             operation.profile in profiles,
-            f"agent node {node.id} references unknown profile: {operation.profile}",
+            (
+                f"agent node {node.id} references unknown profile: "
+                f"{operation.profile}"
+            ),
         )
         _require(
             operation.session in sessions,
-            f"agent node {node.id} references unknown session: {operation.session}",
+            (
+                f"agent node {node.id} references unknown session: "
+                f"{operation.session}"
+            ),
         )
 
 
-def validate_graph(graph: GraphDefinition[Any, Any, Any, Any]) -> None:
-    """Check one graph's structure. Its boundary types are not this function's business.
+def validate_graph(
+    graph: declarations.GraphDefinition[Any, Any, Any, Any],
+) -> None:
+    """Validate graph structure, visits, features, and resource bindings.
 
-    `Any` rather than type variables, and that is the point rather than laziness. Nothing below
-    reads `InputT` or `OutputT` -- only `enter`, `exit`, `failure` and `nodes` -- so the
-    parameters are decoration. The dispatcher validates one concrete subroutine definition at
-    a time, so its workflow envelope and boundary configuration are irrelevant here.
+    Boundary input and output values are checked during execution.
     """
-
     entities = _graph_entities(graph)
     features = _graph_features(graph)
     _validate_graph_edges(graph, entities, features)

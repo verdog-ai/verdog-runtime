@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 import verdog_runtime._checkpoint_compatibility as compatibility_module
 from verdog_runtime._checkpoint_compatibility import (
     checkpoint_compatibility,
@@ -24,7 +25,9 @@ def test_source_fingerprint_changes_with_authored_code(tmp_path: Path) -> None:
     assert compatibility_drift(first, second) == "changed source_sha256"
 
 
-def test_fingerprint_records_nonempty_interpreter_identity(tmp_path: Path) -> None:
+def test_fingerprint_records_nonempty_interpreter_identity(
+    tmp_path: Path,
+) -> None:
     fingerprint = checkpoint_compatibility(tmp_path)
 
     assert fingerprint["python_implementation"] == sys.implementation.name
@@ -37,7 +40,9 @@ def test_fingerprint_records_nonempty_interpreter_identity(tmp_path: Path) -> No
     assert all(fingerprint.values())
 
 
-def test_source_fingerprint_follows_symlinked_authored_code(tmp_path: Path) -> None:
+def test_source_fingerprint_follows_symlinked_authored_code(
+    tmp_path: Path,
+) -> None:
     external = tmp_path / "external"
     external.mkdir()
     authored = external / "impl.py"

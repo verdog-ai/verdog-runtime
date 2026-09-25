@@ -1,18 +1,24 @@
+"""Runtime-selected agent implementations for declared workflow profiles."""
+
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 
-from .agents import AgentInvoker
-from .ids import AgentProfileId
+from verdog_runtime.declarations import agents as agent_declarations
+from verdog_runtime.declarations import ids
 
 
-def _profile_arguments() -> Mapping[AgentProfileId, AgentInvoker]:
+def _profile_arguments() -> Mapping[
+    ids.AgentProfileId, agent_declarations.AgentInvoker
+]:
     return {}
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class WorkflowConfiguration:
-    profile_arguments: Mapping[AgentProfileId, AgentInvoker] = field(
-        default_factory=_profile_arguments
-    )
+    """Concrete providers bound to workflow profile parameters."""
+
+    profile_arguments: Mapping[
+        ids.AgentProfileId, agent_declarations.AgentInvoker
+    ] = dataclasses.field(default_factory=_profile_arguments)

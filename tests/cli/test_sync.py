@@ -13,7 +13,13 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from verdog_runtime.cli.local import SCHEMA_VERSION, Clone, LocalDefinition, WorkspaceError
+
+from verdog_runtime.cli.local import (
+    SCHEMA_VERSION,
+    Clone,
+    LocalDefinition,
+    WorkspaceError,
+)
 from verdog_runtime.cli.requirements import parse_requirements
 from verdog_runtime.cli.sync import (
     ENVIRONMENT_MARKER,
@@ -21,9 +27,9 @@ from verdog_runtime.cli.sync import (
     _install,  # pyright: ignore[reportPrivateUsage]
     _rebuild_directory,  # pyright: ignore[reportPrivateUsage]
     _site_packages,  # pyright: ignore[reportPrivateUsage]
+    _subroutine_sources,  # pyright: ignore[reportPrivateUsage]
     _sync_editor_environment,  # pyright: ignore[reportPrivateUsage]
     _sync_one,  # pyright: ignore[reportPrivateUsage]
-    _subroutine_sources,  # pyright: ignore[reportPrivateUsage]
     require_current_environment,
     sync,
 )
@@ -100,8 +106,12 @@ def _manifest(
     for index, definition in enumerate(clone.workflow_definitions()):
         path = root / definition.source / "requirements.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        declared = requirements if index == 0 and requirements is not None else []
-        path.write_text("".join(f"{item}\n" for item in declared), encoding="utf-8")
+        declared = (
+            requirements if index == 0 and requirements is not None else []
+        )
+        path.write_text(
+            "".join(f"{item}\n" for item in declared), encoding="utf-8"
+        )
     return clone
 
 
@@ -161,7 +171,8 @@ def test_the_runtime_and_its_dependencies_are_provisioned_locally(
             "-I",
             "-c",
             (
-                "import importlib.util, verdog_runtime, verdog_runtime.cli, packaging; "
+                "import importlib.util, verdog_runtime; "
+                "import verdog_runtime.cli, packaging; "
                 "assert importlib.util.find_spec('verdog_compiler') is None; "
                 "assert importlib.util.find_spec('pyverdog') is None; "
                 "assert importlib.util.find_spec('jinja2') is None; "
@@ -191,11 +202,15 @@ def test_the_runtime_and_its_dependencies_are_provisioned_locally(
     )
     assert marker["python"]
     assert marker["requirements"] == []
-    assert marker["runtime_requirements"] == sorted(marker["runtime_requirements"])
+    assert marker["runtime_requirements"] == sorted(
+        marker["runtime_requirements"]
+    )
     assert marker["source_roots"] == [str((clone.root / "src").resolve())]
 
 
-def test_syncing_twice_rebuilds_the_generated_environment(tmp_path: Path) -> None:
+def test_syncing_twice_rebuilds_the_generated_environment(
+    tmp_path: Path,
+) -> None:
     clone = _clone(tmp_path, [])
     definition = _root_definition(clone)
     assert sync(clone) == 0
@@ -247,23 +262,34 @@ def test_failed_install_does_not_mark_the_environment_current(
 
 
 @pytest.mark.parametrize("existing", [False, True])
-@pytest.mark.parametrize("failure", ["create", "seed", "pip", "marker", "interrupt"])
+@pytest.mark.parametrize(
+    "failure", ["create", "seed", "pip", "marker", "interrupt"]
+)
 def test_workflow_rebuild_recovers_after_each_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool, failure: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing: bool,
+    failure: str,
 ) -> None:
     clone = _clone(tmp_path, ["missing-package==1"])
     definition = _root_definition(clone)
     environment = clone.environment(definition)
     if existing:
         environment.mkdir(parents=True)
-        (environment / "keep").write_text("previous environment", encoding="utf-8")
-        (environment / ENVIRONMENT_MARKER).write_text("old marker", encoding="utf-8")
+        (environment / "keep").write_text(
+            "previous environment", encoding="utf-8"
+        )
+        (environment / ENVIRONMENT_MARKER).write_text(
+            "old marker", encoding="utf-8"
+        )
 
     def create(_builder: object, directory: str) -> None:
         target = Path(directory)
         (target / "bin").mkdir(parents=True)
         (target / "bin/python").write_text("interpreter", encoding="utf-8")
-        (target / f"lib/python{sysconfig.get_python_version()}/site-packages").mkdir(parents=True)
+        (
+            target / f"lib/python{sysconfig.get_python_version()}/site-packages"
+        ).mkdir(parents=True)
         if failure == "create":
             raise OSError("injected create failure")
 
@@ -286,19 +312,30 @@ def test_workflow_rebuild_recovers_after_each_failure(
             raise OSError("injected marker failure")
         return write_text(path, content, **kwargs)
 
-    monkeypatch.setattr("verdog_runtime.cli.sync.venv.EnvBuilder.create", create)
+    monkeypatch.setattr(
+        "verdog_runtime.cli.sync.venv.EnvBuilder.create", create
+    )
     monkeypatch.setattr("verdog_runtime.cli.sync._seed_distributions", seed)
     monkeypatch.setattr("verdog_runtime.cli.sync._install", install)
     monkeypatch.setattr(Path, "write_text", write_or_fail)
     if failure == "pip":
         assert _sync_one(clone, definition, only_binary=False) == 9
     else:
-        with pytest.raises(KeyboardInterrupt if failure == "interrupt" else OSError):
+        with pytest.raises(
+            KeyboardInterrupt if failure == "interrupt" else OSError
+        ):
             _sync_one(clone, definition, only_binary=False)
     if existing:
-        assert sorted(path.name for path in environment.iterdir()) == [ENVIRONMENT_MARKER, "keep"]
-        assert (environment / "keep").read_text("utf-8") == "previous environment"
-        assert (environment / ENVIRONMENT_MARKER).read_text("utf-8") == "old marker"
+        assert sorted(path.name for path in environment.iterdir()) == [
+            ENVIRONMENT_MARKER,
+            "keep",
+        ]
+        assert (environment / "keep").read_text(
+            "utf-8"
+        ) == "previous environment"
+        assert (environment / ENVIRONMENT_MARKER).read_text(
+            "utf-8"
+        ) == "old marker"
     else:
         assert not environment.exists()
     assert not list(environment.parent.glob(".verdog-rebuild-*"))
@@ -309,14 +346,19 @@ def test_editor_rebuild_restores_packages_without_changing_other_files(
 ) -> None:
     clone = _clone(tmp_path, [])
     environment = clone.root / ".venv"
-    packages = environment / f"lib/python{sysconfig.get_python_version()}/site-packages"
+    packages = (
+        environment
+        / f"lib/python{sysconfig.get_python_version()}/site-packages"
+    )
     packages.mkdir(parents=True)
     (packages / "old.py").write_text("old package", encoding="utf-8")
     (environment / "keep").write_text("editor-owned", encoding="utf-8")
 
     def fail(destination: Path, requirements: tuple[str, ...]) -> None:
         del requirements
-        (destination / "partial.py").write_text("partial package", encoding="utf-8")
+        (destination / "partial.py").write_text(
+            "partial package", encoding="utf-8"
+        )
         raise OSError("injected editor seed failure")
 
     monkeypatch.setattr("verdog_runtime.cli.sync._seed_distributions", fail)
@@ -345,7 +387,9 @@ def test_environment_retains_backup_when_restoration_fails(
         return 1
 
     monkeypatch.setattr(Path, "replace", fail_restore)
-    with pytest.raises(WorkspaceError, match="Recover the previous environment") as caught:
+    with pytest.raises(
+        WorkspaceError, match="Recover the previous environment"
+    ) as caught:
         _rebuild_directory(environment, fail_build)
     backups = list(tmp_path.glob(".verdog-rebuild-*"))
     assert len(backups) == 1
@@ -363,7 +407,11 @@ def test_install_stops_and_reaps_pip_before_propagating_interrupt(
         pid = 12345
 
         def __init__(
-            self, command: list[str], cwd: Path, *, start_new_session: bool,
+            self,
+            command: list[str],
+            cwd: Path,
+            *,
+            start_new_session: bool,
             creationflags: int,
         ) -> None:
             assert command == ["pip"] and cwd == tmp_path
@@ -396,7 +444,8 @@ def test_install_stops_and_reaps_pip_before_propagating_interrupt(
 
 
 def test_environment_cleanup_failure_does_not_report_a_failed_rebuild(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     environment = tmp_path / "environment"
@@ -421,7 +470,7 @@ def test_environment_cleanup_failure_does_not_report_a_failed_rebuild(
 
 
 @pytest.mark.parametrize("termination", ["success", "missing", "nonzero"])
-def test_windows_install_cancellation_preserves_backup_if_tree_stop_is_uncertain(
+def test_windows_cancellation_preserves_backup_if_tree_stop_is_uncertain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, termination: str
 ) -> None:
     environment = tmp_path / "environment"
@@ -432,7 +481,9 @@ def test_windows_install_cancellation_preserves_backup_if_tree_stop_is_uncertain
     class Process:
         pid = 12345
 
-        def __init__(self, command: list[str], cwd: Path, **kwargs: object) -> None:
+        def __init__(
+            self, command: list[str], cwd: Path, **kwargs: object
+        ) -> None:
             assert command == ["pip"] and cwd == tmp_path
             assert kwargs == {"start_new_session": False, "creationflags": 512}
 
@@ -451,11 +502,15 @@ def test_windows_install_cancellation_preserves_backup_if_tree_stop_is_uncertain
         def kill(self) -> None:
             events.append("kill")
 
-    def taskkill(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    def taskkill(
+        command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[str]:
         assert command == ["taskkill", "/PID", "12345", "/T", "/F"]
         if termination == "missing":
             raise FileNotFoundError("taskkill unavailable")
-        return subprocess.CompletedProcess(command, 0 if termination == "success" else 1)
+        return subprocess.CompletedProcess(
+            command, 0 if termination == "success" else 1
+        )
 
     def build() -> int:
         environment.mkdir()
@@ -463,10 +518,16 @@ def test_windows_install_cancellation_preserves_backup_if_tree_stop_is_uncertain
         return _install(["pip"], tmp_path)
 
     monkeypatch.setattr("verdog_runtime.cli.sync.sys.platform", "win32")
-    monkeypatch.setattr("verdog_runtime.cli.sync.subprocess.CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+    monkeypatch.setattr(
+        "verdog_runtime.cli.sync.subprocess.CREATE_NEW_PROCESS_GROUP",
+        512,
+        raising=False,
+    )
     monkeypatch.setattr("verdog_runtime.cli.sync.subprocess.Popen", Process)
     monkeypatch.setattr("verdog_runtime.cli.sync.subprocess.run", taskkill)
-    with pytest.raises(KeyboardInterrupt if termination == "success" else WorkspaceError):
+    with pytest.raises(
+        KeyboardInterrupt if termination == "success" else WorkspaceError
+    ):
         _rebuild_directory(environment, build)
     assert events == ["wait", "kill", "wait"]
     if termination == "success":
@@ -522,7 +583,7 @@ def test_runtime_content_and_old_markers_make_an_environment_stale(
         assert name == "verdog-runtime"
         return installed
 
-    monkeypatch.setattr("verdog_runtime.cli.sync.metadata.distribution", distribution)
+    monkeypatch.setattr("importlib.metadata.distribution", distribution)
     clone = _clone(tmp_path, [])
     definition = _root_definition(clone)
     marker = clone.environment(definition) / ENVIRONMENT_MARKER
@@ -545,11 +606,15 @@ def test_runtime_content_and_old_markers_make_an_environment_stale(
         require_current_environment(clone, definition)
 
 
-def test_environment_ids_cannot_escape_the_generated_root(tmp_path: Path) -> None:
+def test_environment_ids_cannot_escape_the_generated_root(
+    tmp_path: Path,
+) -> None:
     clone = _clone(tmp_path, [])
     project = clone.project
     project["workflow"]["subroutine"] = "../outside"
-    (clone.root / "project.json").write_text(json.dumps(project), encoding="utf-8")
+    (clone.root / "project.json").write_text(
+        json.dumps(project), encoding="utf-8"
+    )
     outside = clone.root / ".verdog" / "outside"
     outside.mkdir(parents=True)
     marker = outside / "mine"
@@ -567,7 +632,9 @@ def test_local_definition_ids_use_the_language_identifier_grammar(
     clone = _clone(tmp_path, [])
     project = clone.project
     project["subroutine"]["subroutines"] = [_subroutine(identifier)]
-    (clone.root / "project.json").write_text(json.dumps(project), encoding="utf-8")
+    (clone.root / "project.json").write_text(
+        json.dumps(project), encoding="utf-8"
+    )
 
     with pytest.raises(WorkspaceError, match="id"):
         clone.local_definitions()
@@ -647,7 +714,9 @@ def test_definition_names_repeat_in_nested_scopes(tmp_path: Path) -> None:
         item.local_id
         for item in clone.subroutine_closure(clone.workflow_definitions()[0])
     ] == ["main", "main__loop", "main__loop__loop"]
-    assert [clone.environment(item).name for item in clone.workflow_definitions()] == [
+    assert [
+        clone.environment(item).name for item in clone.workflow_definitions()
+    ] == [
         "main",
         "main__loop",
         "main__loop__loop",
@@ -689,11 +758,13 @@ def test_sync_visits_every_workflow_in_each_nested_checkout(
     _manifest(left / "external" / "pin" / "shared", "publisher.shared")
     _manifest(right / "external" / "pin" / "shared", "publisher.shared")
 
-    # Local workflow envelopes are provisioned independently, including below a pin.
+    # Provision local workflow envelopes independently, also below pins.
     left_project = left_clone.project
     left_project["subroutine"]["workflows"] = [_workflow("main__other")]
     left_project["subroutine"]["subroutines"] = [_subroutine("other")]
-    (left / "project.json").write_text(json.dumps(left_project), encoding="utf-8")
+    (left / "project.json").write_text(
+        json.dumps(left_project), encoding="utf-8"
+    )
 
     visited: list[tuple[str, str, bool]] = []
 
@@ -760,7 +831,9 @@ def test_full_sync_initializes_missing_direct_and_nested_submodules(
         return 0
 
     monkeypatch.setattr("verdog_runtime.cli.local.git", fake_git)
-    monkeypatch.setattr("verdog_runtime.cli.sync._sync_editor_environment", ignore_editor)
+    monkeypatch.setattr(
+        "verdog_runtime.cli.sync._sync_editor_environment", ignore_editor
+    )
     monkeypatch.setattr("verdog_runtime.cli.sync._sync_one", record)
 
     assert sync(clone) == 0
@@ -835,7 +908,9 @@ def test_full_sync_does_not_touch_an_existing_checkout(
         return 0
 
     monkeypatch.setattr("verdog_runtime.cli.local.git", fake_git)
-    monkeypatch.setattr("verdog_runtime.cli.sync._sync_editor_environment", ignore_editor)
+    monkeypatch.setattr(
+        "verdog_runtime.cli.sync._sync_editor_environment", ignore_editor
+    )
     monkeypatch.setattr("verdog_runtime.cli.sync._sync_one", ignore_workflow)
 
     assert sync(clone) == 0
@@ -871,9 +946,13 @@ def test_full_sync_does_not_repair_unrecognized_or_conflicted_checkouts(
         pytest.fail("environment creation preceded dependency validation")
 
     monkeypatch.setattr("verdog_runtime.cli.local.git", fake_git)
-    monkeypatch.setattr("verdog_runtime.cli.sync._sync_editor_environment", unexpected_editor)
+    monkeypatch.setattr(
+        "verdog_runtime.cli.sync._sync_editor_environment", unexpected_editor
+    )
 
-    with pytest.raises(WorkspaceError, match="is not an uninitialized submodule"):
+    with pytest.raises(
+        WorkspaceError, match="is not an uninitialized submodule"
+    ):
         sync(clone)
     assert calls == [("submodule", "status", "--", "external/dependency/child")]
 
@@ -890,13 +969,17 @@ def test_full_sync_requires_a_manifest_after_initialization(
 
     def fake_git(_root: Path, *arguments: str) -> str:
         calls.append(arguments)
-        return f"-{'a' * 40} {arguments[-1]}\n" if arguments[1] == "status" else ""
+        return (
+            f"-{'a' * 40} {arguments[-1]}\n" if arguments[1] == "status" else ""
+        )
 
     def unexpected_editor(_: Clone) -> None:
         pytest.fail("environment creation preceded dependency validation")
 
     monkeypatch.setattr("verdog_runtime.cli.local.git", fake_git)
-    monkeypatch.setattr("verdog_runtime.cli.sync._sync_editor_environment", unexpected_editor)
+    monkeypatch.setattr(
+        "verdog_runtime.cli.sync._sync_editor_environment", unexpected_editor
+    )
 
     with pytest.raises(WorkspaceError, match="after submodule initialization"):
         sync(clone)
@@ -922,11 +1005,15 @@ def test_targeted_sync_visits_only_one_workflow_in_the_current_clone(
     def ignore_editor(_: Clone) -> None:
         pass
 
-    def record(_: Clone, definition: LocalDefinition, *, only_binary: bool) -> int:
+    def record(
+        _: Clone, definition: LocalDefinition, *, only_binary: bool
+    ) -> int:
         visited.append(f"{definition.local_id}:{only_binary}")
         return 0
 
-    monkeypatch.setattr("verdog_runtime.cli.sync._sync_editor_environment", ignore_editor)
+    monkeypatch.setattr(
+        "verdog_runtime.cli.sync._sync_editor_environment", ignore_editor
+    )
     monkeypatch.setattr("verdog_runtime.cli.sync._sync_one", record)
 
     assert sync(clone, workflow_id="main__child", only_binary=True) == 0
@@ -1001,7 +1088,10 @@ def test_in_process_calls_cannot_load_two_checkouts_of_one_package(
                 "session_arguments": {},
             },
         }
-        for name, alias in (("stable", "channel.stable"), ("canary", "channel.canary"))
+        for name, alias in (
+            ("stable", "channel.stable"),
+            ("canary", "channel.canary"),
+        )
     ]
     clone = _manifest(
         tmp_path / "root",

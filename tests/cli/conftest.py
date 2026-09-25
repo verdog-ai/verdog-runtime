@@ -9,7 +9,9 @@ from verdog_runtime.cli import session
 
 
 @pytest.fixture(autouse=True)
-def isolate_service_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def isolate_service_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv("VERDOG_BACKEND_ORIGIN", raising=False)
     monkeypatch.delenv("VERDOG_SESSION_TOKEN_STDIN", raising=False)

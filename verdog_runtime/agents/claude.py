@@ -1,28 +1,24 @@
+"""Invoke Claude CLI sessions and collect their responses and artifacts."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import dataclasses
 from typing import cast
 
-from ..declarations import AgentAccess
-from ..declarations.agents import (
-    AgentInvocationError,
-    AgentReply,
-    AgentRequest,
-    AgentSessionAction,
-    AgentSessionCapabilities,
-)
-from ..declarations.ids import ProviderSessionId
-from ._command import (
-    invoke_provider,
-    json_objects,
-    validate_extra_args,
-)
+from verdog_runtime import declarations
+from verdog_runtime.agents import _command as provider_command
+from verdog_runtime.declarations import agents as agent_declarations
+from verdog_runtime.declarations import ids
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class ClaudeInvoker:
+    """Claude CLI configuration implementing the agent invocation protocol."""
+
     session_provider = "claude"
-    session_capabilities = AgentSessionCapabilities(fork_latest=True)
+    session_capabilities = agent_declarations.AgentSessionCapabilities(
+        fork_latest=True
+    )
 
     executable: str = "claude"
     model: str | None = None
@@ -32,7 +28,8 @@ class ClaudeInvoker:
     web_search: bool = False
 
     def __post_init__(self) -> None:
-        validate_extra_args(
+        """Reject extra arguments that override runtime invocation flags."""
+        provider_command.validate_extra_args(
             self.extra_args,
             {
                 "--add-dir",
@@ -61,8 +58,11 @@ class ClaudeInvoker:
             "claude",
         )
 
-    def __call__(self, request: AgentRequest, /) -> AgentReply:
-        return invoke_provider(
+    def __call__(
+        self, request: agent_declarations.AgentRequest, /
+    ) -> agent_declarations.AgentReply:
+        """Run one request and retain its session and diagnostic artifacts."""
+        return provider_command.invoke_provider(
             request,
             "claude",
             self.executable,
@@ -71,7 +71,9 @@ class ClaudeInvoker:
             lambda result: _response(result.events),
         )
 
-    def _command(self, request: AgentRequest, /) -> list[str]:
+    def _command(
+        self, request: agent_declarations.AgentRequest, /
+    ) -> list[str]:
         command = [
             self.executable,
             "-p",
@@ -84,23 +86,36 @@ class ClaudeInvoker:
             command.append("--no-session-persistence")
         if request.provider_session_id is not None:
             command.extend(("--resume", str(request.provider_session_id)))
-            if request.provider_session_action is AgentSessionAction.FORK:
+            if (
+                request.provider_session_action
+                is agent_declarations.AgentSessionAction.FORK
+            ):
                 command.append("--fork-session")
         if self.model is not None:
             command.extend(("--model", self.model))
         if self.reasoning_effort is not None:
             command.extend(("--effort", self.reasoning_effort))
-        if request.access is AgentAccess.READ_ONLY:
-            tools = "Read,Glob,Grep,WebSearch,WebFetch" if self.web_search else "Read,Glob,Grep"
+        if request.access is declarations.AgentAccess.READ_ONLY:
+            tools = (
+                "Read,Glob,Grep,WebSearch,WebFetch"
+                if self.web_search
+                else "Read,Glob,Grep"
+            )
             command.extend(("--permission-mode", "plan", "--tools", tools))
         else:
             command.extend(("--permission-mode", "acceptEdits"))
         return command
 
 
-def _claude_session(event: dict[str, object], /) -> ProviderSessionId | None:
+def _claude_session(
+    event: dict[str, object], /
+) -> ids.ProviderSessionId | None:
     value = event.get("session_id")
-    return ProviderSessionId(value) if isinstance(value, str) and value else None
+    return (
+        ids.ProviderSessionId(value)
+        if isinstance(value, str) and value
+        else None
+    )
 
 
 def _claude_reasoning(event: dict[str, object], /) -> tuple[str, ...]:
@@ -127,22 +142,26 @@ def _claude_reasoning(event: dict[str, object], /) -> tuple[str, ...]:
     return tuple(found)
 
 
-def _response(events: str, /) -> tuple[str, ProviderSessionId | None, str]:
+def _response(events: str, /) -> tuple[str, ids.ProviderSessionId | None, str]:
     terminal: dict[str, object] | None = None
-    provider_session_id: ProviderSessionId | None = None
+    provider_session_id: ids.ProviderSessionId | None = None
     reasoning: list[str] = []
-    for event in json_objects(events):
+    for event in provider_command.json_objects(events):
         provider_session_id = provider_session_id or _claude_session(event)
         if event.get("type") == "result":
             terminal = event
         reasoning.extend(_claude_reasoning(event))
     if terminal is None:
-        raise AgentInvocationError("claude returned no result event")
+        raise agent_declarations.AgentInvocationError(
+            "claude returned no result event"
+        )
     if terminal.get("is_error") is True:
-        raise AgentInvocationError(
+        raise agent_declarations.AgentInvocationError(
             f"claude returned an error: {terminal.get('result')}"
         )
     response = terminal.get("result")
     if not isinstance(response, str):
-        raise AgentInvocationError("claude result has no text")
+        raise agent_declarations.AgentInvocationError(
+            "claude result has no text"
+        )
     return response, provider_session_id, "\n\n".join(reasoning)

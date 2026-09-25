@@ -1,9 +1,8 @@
-"""Typed keys for immutable workflow state."""
+"""Typed keys for workflow state."""
 
 from __future__ import annotations
 
 from typing import Generic, TypeAlias, TypeVar
-
 
 StateT = TypeVar("StateT")
 ScopeT = TypeVar("ScopeT")
@@ -17,4 +16,5 @@ class StateKey(Generic[StateT, ScopeT]):
 
     @property
     def state_key(self) -> StateAddress:
+        """The declaration address used in serialized workflow state."""
         raise NotImplementedError

@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-import verdog_runtime._run_metadata as run_metadata
+
 import verdog_runtime._artifact_references as artifact_references
+import verdog_runtime._run_metadata as run_metadata
 from verdog_runtime._run_store import (
     Boundary,
     CheckpointKind,
@@ -66,7 +67,9 @@ def _checkpoint(
         restore_available=restorable,
         fork_with_branch_available=branchable,
         fork_with_fresh_available=restorable,
-        unavailable_code=None if restorable else "checkpoint.value_unserializable",
+        unavailable_code=None
+        if restorable
+        else "checkpoint.value_unserializable",
         unavailable_reason=reason,
     )
 
@@ -104,7 +107,10 @@ def test_create_writes_versioned_metadata_and_registers_custom_output(
             pass
         assert captured.value.code == "run.active"
     assert not run_is_active(store.output_dir)
-    with pytest.raises(BlockingIOError, match="authored failure"), store.lease():
+    with (
+        pytest.raises(BlockingIOError, match="authored failure"),
+        store.lease(),
+    ):
         raise BlockingIOError("authored failure")
 
     updated = store.update(status=RunStatus.SUCCEEDED)
@@ -135,17 +141,23 @@ def test_checkpoint_commit_is_atomic_and_latest_boundary_controls_resume(
     assert checkpoint_manifest["fork_with_fresh_available"] is True
     assert checkpoint_manifest["shards"][1]["size"] == 4
     assert len(checkpoint_manifest["shards"][1]["sha256"]) == 64
-    assert [item.sequence for item in checkpoint_summaries(store.output_dir)] == [1]
+    assert [
+        item.sequence for item in checkpoint_summaries(store.output_dir)
+    ] == [1]
     assert not tuple((store.control_dir / "staging").iterdir())
 
     second = store.commit_checkpoint(
-        _checkpoint(2, restorable=False, reason="one value cannot be serialized")
+        _checkpoint(
+            2, restorable=False, reason="one value cannot be serialized"
+        )
     )
     assert second.checkpoints.count == 2
     assert second.checkpoints.latest_completed == 2
     assert second.checkpoints.latest_restorable == 1
     assert not second.checkpoints.resume_available
-    assert second.checkpoints.unavailable_code == "checkpoint.value_unserializable"
+    assert (
+        second.checkpoints.unavailable_code == "checkpoint.value_unserializable"
+    )
 
     with pytest.raises(RunStoreError, match="already committed"):
         store.commit_checkpoint(_checkpoint(2))
@@ -226,7 +238,9 @@ def test_damaged_latest_checkpoint_never_silently_rolls_back(
     assert captured.value.code == expected_code
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX named pipes")
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo"), reason="requires POSIX named pipes"
+)
 @pytest.mark.parametrize("replaced_at_open", [False, True])
 def test_registry_rejects_named_pipes_without_blocking(
     tmp_path: Path,
@@ -261,7 +275,9 @@ def test_registry_rejects_named_pipes_without_blocking(
 
 
 @pytest.mark.parametrize("version", [1, 2])
-def test_old_checkpoint_formats_are_rejected(tmp_path: Path, version: int) -> None:
+def test_old_checkpoint_formats_are_rejected(
+    tmp_path: Path, version: int
+) -> None:
     store = _store(tmp_path)
     store.commit_checkpoint(_checkpoint(1), shards={"runtime.pkl": b"state"})
     path = store.checkpoint_directory(1) / "manifest.json"
@@ -288,10 +304,14 @@ def test_preserves_independent_fresh_fork_availability(tmp_path: Path) -> None:
     assert not reopened.fork_with_fresh_available
 
 
-def test_invalid_shards_never_publish_a_partial_checkpoint(tmp_path: Path) -> None:
+def test_invalid_shards_never_publish_a_partial_checkpoint(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
 
-    with pytest.raises(RunStoreError, match="unsafe checkpoint shard") as captured:
+    with pytest.raises(
+        RunStoreError, match="unsafe checkpoint shard"
+    ) as captured:
         store.commit_checkpoint(_checkpoint(1), shards={"../outside": b"no"})
     assert captured.value.code == "checkpoint.shard_invalid"
     assert not store.checkpoint_directory(1).exists()
@@ -310,7 +330,9 @@ def test_invalid_shards_never_publish_a_partial_checkpoint(tmp_path: Path) -> No
     assert duplicate.value.code == "checkpoint.shard_corrupt"
 
 
-def test_open_reader_detects_a_new_authoritative_checkpoint(tmp_path: Path) -> None:
+def test_open_reader_detects_a_new_authoritative_checkpoint(
+    tmp_path: Path,
+) -> None:
     writer = _store(tmp_path)
     reader = RunStore.open(writer.output_dir)
     assert not reader.checkpoints()
@@ -321,7 +343,6 @@ def test_open_reader_detects_a_new_authoritative_checkpoint(tmp_path: Path) -> N
     assert refreshed.checkpoints.latest_completed == 1
     assert [item.sequence for item in reader.checkpoints()] == [1]
     assert reader.checkpoint_shard(1, "runtime.pkl") == b"state"
-
 
 
 def test_checkpoint_is_parsed_once_for_summary_shards_and_artifacts(
@@ -341,7 +362,7 @@ def test_checkpoint_is_parsed_once_for_summary_shards_and_artifacts(
         capture_artifacts=True,
     )
     manifest_path = store.checkpoint_directory(1) / "manifest.json"
-    real_read: Any = getattr(run_metadata, "_read_object")
+    real_read = run_metadata._read_object  # pyright: ignore[reportPrivateUsage]
     reads = 0
 
     def counting_read(path: Path, *, code: str) -> dict[str, Any]:
@@ -374,7 +395,7 @@ def test_checkpoint_replacement_during_its_single_parse_is_rejected(
     store = _store(tmp_path)
     store.commit_checkpoint(_checkpoint(1), shards={"runtime.pkl": b"state"})
     manifest_path = store.checkpoint_directory(1) / "manifest.json"
-    real_read: Any = getattr(run_metadata, "_read_object")
+    real_read = run_metadata._read_object  # pyright: ignore[reportPrivateUsage]
 
     def replacing_read(path: Path, *, code: str) -> dict[str, Any]:
         value = real_read(path, code=code)
@@ -385,7 +406,9 @@ def test_checkpoint_replacement_during_its_single_parse_is_rejected(
         return value
 
     monkeypatch.setattr(run_metadata, "_read_object", replacing_read)
-    with pytest.raises(RunStoreError, match="changed while it was read") as race:
+    with pytest.raises(
+        RunStoreError, match="changed while it was read"
+    ) as race:
         load_checkpoint_summary(manifest_path)
     assert race.value.code == "checkpoint.manifest_unreadable"
 
@@ -398,7 +421,9 @@ def test_checkpoint_metadata_rejects_impossible_availability_and_sequence_gaps(
         _checkpoint(1, restorable=False),
         fork_with_fresh_available=True,
     )
-    with pytest.raises(RunStoreError, match="availability flags") as availability:
+    with pytest.raises(
+        RunStoreError, match="availability flags"
+    ) as availability:
         store.commit_checkpoint(impossible)
     assert availability.value.code == "checkpoint.manifest_invalid"
     assert not store.checkpoint_directory(1).exists()
@@ -417,7 +442,8 @@ def test_checkpoint_metadata_rejects_impossible_availability_and_sequence_gaps(
         store.checkpoints()
     assert gap.value.code == "checkpoint.sequence_gap"
 
-    # Validation must scale with the checkpoint count, not an untrusted sequence.
+    # Validation must scale with the checkpoint count, not an untrusted
+    # sequence.
     path = store.checkpoint_directory(2) / "manifest.json"
     document = json.loads(path.read_text("utf-8"))
     document["sequence"] = 10**12
@@ -438,9 +464,12 @@ def test_same_run_resume_requires_a_branchable_conversation_anchor(
     assert manifest.checkpoints.latest_restorable == 1
     assert not manifest.checkpoints.resume_available
     assert (
-        manifest.checkpoints.unavailable_code == "checkpoint.session_branch_unavailable"
+        manifest.checkpoints.unavailable_code
+        == "checkpoint.session_branch_unavailable"
     )
-    assert "provider conversations" in str(manifest.checkpoints.unavailable_reason)
+    assert "provider conversations" in str(
+        manifest.checkpoints.unavailable_reason
+    )
 
 
 def test_manifest_rejects_a_moved_or_retargeted_output(tmp_path: Path) -> None:
@@ -478,23 +507,30 @@ def test_artifact_references_only_write_metadata_and_reuse_verified_hashes(
     (visit / "empty").mkdir()
     inode = payload.stat().st_ino
     reads: list[Path] = []
-    real_read: Any = getattr(artifact_references, "_read_artifact")
+    real_read = artifact_references._read_artifact  # pyright: ignore[reportPrivateUsage]
 
     def read(*args: Any, **kwargs: Any) -> Any:
         reads.append(args[1])
         return real_read(*args, **kwargs)
 
     def forbid_copy(*args: Any, **kwargs: Any) -> None:
-        pytest.fail("checkpointing must not copy, reflink, or hard-link artifacts")
+        pytest.fail(
+            "checkpointing must not copy, reflink, or hard-link artifacts"
+        )
 
     monkeypatch.setattr(artifact_references, "_read_artifact", read)
-    monkeypatch.setattr(artifact_references, "_materialize_artifact_bytes", forbid_copy)
+    monkeypatch.setattr(
+        artifact_references, "_materialize_artifact_bytes", forbid_copy
+    )
     monkeypatch.setattr(os, "link", forbid_copy)
     for sequence in (1, 2):
         store.commit_checkpoint(_checkpoint(sequence), capture_artifacts=True)
         assert store.artifact_references_available(sequence)
         checkpoint = store.checkpoint_directory(sequence)
-        assert {path.name for path in checkpoint.iterdir()} == {"manifest.json", "shards"}
+        assert {path.name for path in checkpoint.iterdir()} == {
+            "manifest.json",
+            "shards",
+        }
         document = json.loads((checkpoint / "manifest.json").read_text("utf-8"))
         assert document["artifacts"]["kind"] == "references"
         assert [item["path"] for item in document["artifacts"]["files"]] == [
@@ -507,7 +543,9 @@ def test_artifact_references_only_write_metadata_and_reuse_verified_hashes(
     assert payload.stat().st_ino == inode
 
 
-def test_runtime_scratch_and_reports_are_excluded_by_ownership(tmp_path: Path) -> None:
+def test_runtime_scratch_and_reports_are_excluded_by_ownership(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     graph = store.output_dir / "call/000001"
     graph.mkdir(parents=True)
@@ -527,10 +565,14 @@ def test_runtime_scratch_and_reports_are_excluded_by_ownership(tmp_path: Path) -
     (ordinary / "stats.md").write_text("user stats", encoding="utf-8")
     (ordinary / "trace.log").write_text("user trace", encoding="utf-8")
     first = store.capture_artifacts()
-    files = {item["path"] for item in cast(list[dict[str, object]], first["files"])}
+    files = {
+        item["path"] for item in cast(list[dict[str, object]], first["files"])
+    }
     assert files == {
-        "call/000001/.verdog-invocation.json", "call/000001/stacktrace.txt",
-        "call/000001/node/000001/config.md", "call/000001/node/000001/stats.md",
+        "call/000001/.verdog-invocation.json",
+        "call/000001/stacktrace.txt",
+        "call/000001/node/000001/config.md",
+        "call/000001/node/000001/stats.md",
         "call/000001/node/000001/trace.log",
     }
     store.commit_checkpoint(_checkpoint(1), artifact_references=first)
@@ -542,7 +584,7 @@ def test_runtime_scratch_and_reports_are_excluded_by_ownership(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("damage", ["modify", "remove", "mode", "symlink"])
-def test_referenced_files_are_immutable_and_failed_capture_keeps_previous_checkpoint(
+def test_failed_capture_preserves_immutable_files_and_previous_checkpoint(
     tmp_path: Path, damage: str
 ) -> None:
     store = _store(tmp_path)
@@ -560,7 +602,10 @@ def test_referenced_files_are_immutable_and_failed_capture_keeps_previous_checkp
         payload.symlink_to(tmp_path / "missing")
     with pytest.raises(RunStoreError) as failure:
         store.commit_checkpoint(_checkpoint(2), capture_artifacts=True)
-    assert failure.value.code in {"checkpoint.artifact_corrupt", "checkpoint.artifact_unsafe"}
+    assert failure.value.code in {
+        "checkpoint.artifact_corrupt",
+        "checkpoint.artifact_unsafe",
+    }
     assert store.checkpoint_directory(1).is_dir()
     assert not store.checkpoint_directory(2).exists()
     assert not tuple((store.control_dir / "staging").iterdir())
@@ -593,7 +638,7 @@ def test_remote_inventory_is_persisted_without_late_rescan(
         store.commit_checkpoint(_checkpoint(2), artifact_references=changed)
 
 
-def test_artifact_materialization_is_independent_and_preserves_boundary_and_modes(
+def test_artifact_copy_is_independent_and_preserves_boundary_and_modes(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -624,7 +669,9 @@ def test_artifact_materialization_is_independent_and_preserves_boundary_and_mode
     assert restored_script.read_text("utf-8") == "fork mutation\n"
 
 
-def test_resume_validation_seeds_capture_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resume_validation_seeds_capture_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = _store(tmp_path)
     (store.output_dir / "result.txt").write_text("stable", encoding="utf-8")
     store.commit_checkpoint(_checkpoint(1), capture_artifacts=True)
@@ -638,7 +685,9 @@ def test_resume_validation_seeds_capture_cache(tmp_path: Path, monkeypatch: pyte
     reader.commit_checkpoint(_checkpoint(2), capture_artifacts=True)
 
 
-@pytest.mark.parametrize("unsafe_path", ["../escape", "node/.verdog/workspace/file", ".verdog/file"])
+@pytest.mark.parametrize(
+    "unsafe_path", ["../escape", "node/.verdog/workspace/file", ".verdog/file"]
+)
 def test_artifact_capture_and_materialization_reject_unsafe_paths(
     tmp_path: Path, unsafe_path: str
 ) -> None:
@@ -646,8 +695,14 @@ def test_artifact_capture_and_materialization_reject_unsafe_paths(
     outside = tmp_path / "outside.txt"
     outside.write_text("outside", encoding="utf-8")
     (store.output_dir / "unsafe-link").symlink_to(outside)
-    with pytest.raises(RunStoreError, match="regular file or directory") as unsafe:
-        store.commit_checkpoint(_checkpoint(1), shards={"runtime.pkl": b"state"}, capture_artifacts=True)
+    with pytest.raises(
+        RunStoreError, match="regular file or directory"
+    ) as unsafe:
+        store.commit_checkpoint(
+            _checkpoint(1),
+            shards={"runtime.pkl": b"state"},
+            capture_artifacts=True,
+        )
     assert unsafe.value.code == "checkpoint.artifact_unsafe"
     assert not store.checkpoint_directory(1).exists()
     assert not tuple((store.control_dir / "staging").iterdir())
@@ -659,20 +714,26 @@ def test_artifact_capture_and_materialization_reject_unsafe_paths(
     manifest["artifacts"]["files"][0]["path"] = unsafe_path
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     destination = tmp_path / "unsafe-fork"
-    with pytest.raises(RunStoreError, match="unsafe checkpoint artifact") as traversal:
+    with pytest.raises(
+        RunStoreError, match="unsafe checkpoint artifact"
+    ) as traversal:
         store.materialize_artifacts(1, destination)
     assert traversal.value.code == "checkpoint.artifact_unsafe"
     assert not destination.exists()
 
 
-def test_artifact_materialization_refuses_nonempty_or_overlapping_outputs(tmp_path: Path) -> None:
+def test_artifact_materialization_refuses_nonempty_or_overlapping_outputs(
+    tmp_path: Path,
+) -> None:
     store = _store(tmp_path)
     (store.output_dir / "result.txt").write_text("safe", encoding="utf-8")
     store.commit_checkpoint(_checkpoint(1), capture_artifacts=True)
     occupied = tmp_path / "occupied"
     occupied.mkdir()
     (occupied / "mine.txt").write_text("keep", encoding="utf-8")
-    with pytest.raises(RunStoreError, match="not an empty directory") as nonempty:
+    with pytest.raises(
+        RunStoreError, match="not an empty directory"
+    ) as nonempty:
         store.materialize_artifacts(1, occupied)
     assert nonempty.value.code == "checkpoint.artifact_destination_not_empty"
     assert (occupied / "mine.txt").read_text("utf-8") == "keep"

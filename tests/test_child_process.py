@@ -15,9 +15,10 @@ from typing import Any, NoReturn, TypeVar, cast, override
 
 import pytest
 import typing_extensions
-import verdog_runtime
 from layout_helpers import legacy_graph_create
 from report_helpers import call_reports, table_rows
+
+import verdog_runtime
 from verdog_runtime._child_checkpoint import (
     ChildCheckpointBundle,
     decode_child_checkpoint,
@@ -194,10 +195,12 @@ def _definition(
             definition_module=module_name,
             params_types=params_types,
             profile_arguments={
-                parameter.id: parameter.id for parameter in graph.profile_parameters
+                parameter.id: parameter.id
+                for parameter in graph.profile_parameters
             },
             session_arguments={
-                parameter.id: parameter.id for parameter in graph.session_parameters
+                parameter.id: parameter.id
+                for parameter in graph.session_parameters
             },
         ),
         configuration=WorkflowConfiguration(),
@@ -252,7 +255,9 @@ def _child_project(
     (subroutine / "workflows/__init__.py").write_text("", encoding="utf-8")
     params_type = "Params" if typed_params else "type(None)"
     params_import = (
-        "from child_project.subroutines.main import Params\n" if typed_params else ""
+        "from child_project.subroutines.main import Params\n"
+        if typed_params
+        else ""
     )
     (workflow / "__init__.py").write_text(
         "from functools import cache\n"
@@ -266,7 +271,8 @@ def _child_project(
         "input_type=int, entry=SubroutineCall("
         "definition_id=GraphId('child_project.main'), "
         "definition_module='child_project.subroutines.main', "
-        f"params_types={{('.', GraphId('child_project.main')): {params_type}}}, "
+        "params_types={('.', GraphId('child_project.main')): "
+        f"{params_type}}}, "
         "profile_arguments={}, session_arguments={}), "
         "configuration=WorkflowConfiguration())\n",
         encoding="utf-8",
@@ -331,11 +337,15 @@ def work(input, state, context, /):
         expected_environment = os.path.join(
             os.getcwd(), ".verdog", "environments", "main"
         )
-        assert os.path.samefile(os.environ["VIRTUAL_ENV"], expected_environment), (
-            os.environ["VIRTUAL_ENV"], expected_environment)
+        actual_environment = os.environ["VIRTUAL_ENV"]
+        assert os.path.samefile(actual_environment, expected_environment), (
+            actual_environment, expected_environment
+        )
         resolved_python = shutil.which("python")
         assert resolved_python is not None
-        assert os.path.samefile(resolved_python, sys.executable), (resolved_python, sys.executable)
+        assert os.path.samefile(resolved_python, sys.executable), (
+            resolved_python, sys.executable
+        )
     if not isinstance(input, int):
         return Success(output=input, state=state)
     return Success(output=(input + {increment}, os.getpid()), state=state)
@@ -358,10 +368,12 @@ GRAPH = GraphDefinition(
     failure=FAILURE,
     nodes=(WORK,),
     edges=(
-        EdgeDefinition(id=EdgeId("in"), name="in", source=ENTER.id, target=WORK.id,
+        EdgeDefinition(id=EdgeId("in"), name="in",
+                       source=ENTER.id, target=WORK.id,
                        conditions=(), effects=(),
                        visit=VisitDefinition(implementation=work)),
-        EdgeDefinition(id=EdgeId("out"), name="out", source=WORK.id, target=EXIT.id,
+        EdgeDefinition(id=EdgeId("out"), name="out",
+                       source=WORK.id, target=EXIT.id,
                        conditions=(), effects=()),
     ),
 )
@@ -458,7 +470,8 @@ def _bridge_project(
     )
     call_params = (
         f"        params_types={{\n"
-        f"            ({project_path!r}, GraphId({target_params_id!r})): type(None),\n"
+        f"            ({project_path!r}, "
+        f"GraphId({target_params_id!r})): type(None),\n"
         f"{nested_params}        }},\n"
         "        profile_arguments={},\n"
         "        session_arguments={},\n"
@@ -593,8 +606,14 @@ from functools import cache
 from pathlib import Path
 
 from verdog_runtime.declarations import (
-    EdgeDefinition, GraphDefinition, NodeDefinition, PortDefinition, Python,
-    SubroutineDefinition, Success, VisitDefinition,
+    EdgeDefinition,
+    GraphDefinition,
+    NodeDefinition,
+    PortDefinition,
+    Python,
+    SubroutineDefinition,
+    Success,
+    VisitDefinition,
 )
 from verdog_runtime.declarations.ids import EdgeId, GraphId, NodeId
 
@@ -623,19 +642,41 @@ def second(input, state, context, /):
 ENTER = PortDefinition(id=NodeId("enter"))
 EXIT = PortDefinition(id=NodeId("exit"))
 FAILURE = PortDefinition(id=NodeId("failure"))
-FIRST = NodeDefinition(id=NodeId("first"), name="First", state_type=EmptyState,
-                       operation=Python())
-SECOND = NodeDefinition(id=NodeId("second"), name="Second", state_type=EmptyState,
-                        operation=Python())
+FIRST = NodeDefinition(
+    id=NodeId("first"),
+    name="First",
+    state_type=EmptyState,
+    operation=Python(),
+)
+SECOND = NodeDefinition(
+    id=NodeId("second"),
+    name="Second",
+    state_type=EmptyState,
+    operation=Python(),
+)
 GRAPH = GraphDefinition(
-    id=GraphId("child_project.main"), params_type=type(None), enter=ENTER,
-    exit=EXIT, failure=FAILURE, nodes=(FIRST, SECOND),
+    id=GraphId("child_project.main"),
+    params_type=type(None),
+    enter=ENTER,
+    exit=EXIT,
+    failure=FAILURE,
+    nodes=(FIRST, SECOND),
     edges=(
-        EdgeDefinition(id=EdgeId("in"), source=ENTER.id, target=FIRST.id,
-                       visit=VisitDefinition(implementation=first)),
-        EdgeDefinition(id=EdgeId("next"), source=FIRST.id, target=SECOND.id,
-                       visit=VisitDefinition(implementation=second)),
-        EdgeDefinition(id=EdgeId("out"), source=SECOND.id, target=EXIT.id),
+        EdgeDefinition(
+            id=EdgeId("in"),
+            source=ENTER.id,
+            target=FIRST.id,
+            visit=VisitDefinition(implementation=first),
+        ),
+        EdgeDefinition(
+            id=EdgeId("next"),
+            source=FIRST.id,
+            target=SECOND.id,
+            visit=VisitDefinition(implementation=second),
+        ),
+        EdgeDefinition(
+            id=EdgeId("out"), source=SECOND.id, target=EXIT.id
+        ),
     ),
 )
 
@@ -668,9 +709,14 @@ def _durable_parent(
             if not catch_remote_error:
                 raise
             return Success(output=-1, state=state)
-        if interrupt_after_return is not None and interrupt_after_return["enabled"]:
+        if (
+            interrupt_after_return is not None
+            and interrupt_after_return["enabled"]
+        ):
             raise KeyboardInterrupt("interrupt after isolated child return")
-        value = child_output[0] if isinstance(child_output, tuple) else child_output
+        value = (
+            child_output[0] if isinstance(child_output, tuple) else child_output
+        )
         return Success(output=value, state=state)
 
     enter = PortDefinition(id=NodeId("parent_enter"))
@@ -685,7 +731,9 @@ def _durable_parent(
                 definition_id=GraphId("child_project.main"),
                 definition_module="child_project.subroutines.main",
                 project_path=project_path,
-                params_types={(project_path, GraphId("child_project.main")): type(None)},
+                params_types={
+                    (project_path, GraphId("child_project.main")): type(None)
+                },
                 profile_arguments={},
                 session_arguments={},
             )
@@ -892,7 +940,9 @@ def test_child_checkpoint_envelope_is_strict_and_marks_nested_forks(
 
     malformed = json.loads(outer)
     malformed["runtime"] = "not base64"
-    with pytest.raises(ValueError, match="checkpoint runtime is not encoded bytes"):
+    with pytest.raises(
+        ValueError, match="checkpoint runtime is not encoded bytes"
+    ):
         decode_child_checkpoint(json.dumps(malformed).encode("utf-8"))
 
 
@@ -1007,7 +1057,12 @@ def test_checkpoint_frames_keep_child_continuations_opaque_and_scoped() -> None:
             "restore_available": True,
             "session_branch_available": True,
             "continuation": encode_binary_payload(b"opaque child state"),
-            "artifact_references": {"schema_version": 1, "kind": "references", "directories": [], "files": []},
+            "artifact_references": {
+                "schema_version": 1,
+                "kind": "references",
+                "directories": [],
+                "files": [],
+            },
             "unavailable_code": None,
             "unavailable_reason": None,
         }
@@ -1077,7 +1132,9 @@ def test_reply_dispatch_preserves_validation_order(
         )
 
 
-def test_protocol_reader_stops_at_the_result_without_waiting_for_pipe_eof() -> None:
+def test_protocol_reader_stops_at_the_result_without_waiting_for_pipe_eof() -> (
+    None
+):
     events: list[EventFrame] = []
     checkpoints: list[CheckpointFrame] = []
     timings: list[TimingRecord] = []
@@ -1118,7 +1175,12 @@ def test_protocol_reader_stops_at_the_result_without_waiting_for_pipe_eof() -> N
             "restore_available": True,
             "session_branch_available": True,
             "continuation": encode_binary_payload(b"snapshot"),
-            "artifact_references": {"schema_version": 1, "kind": "references", "directories": [], "files": []},
+            "artifact_references": {
+                "schema_version": 1,
+                "kind": "references",
+                "directories": [],
+                "files": [],
+            },
             "unavailable_code": None,
             "unavailable_reason": None,
         },
@@ -1167,7 +1229,9 @@ def test_protocol_reader_stops_at_the_result_without_waiting_for_pipe_eof() -> N
         stream.close()
         writing.join(timeout=2)
 
-    assert terminal == SuccessFrame(output="x" * 70_000, transitions_remaining=3)
+    assert terminal == SuccessFrame(
+        output="x" * 70_000, transitions_remaining=3
+    )
     assert error is None
     assert len(events) == 1 and events[0].transitions_remaining == 4
     assert len(checkpoints) == 1
@@ -1227,7 +1291,11 @@ def test_typed_reply_frames_round_trip_the_v13_wire_shape() -> None:
         ),
         (
             timing,
-            {"version": 13, "type": "timing", "record": asdict(_timing_record())},
+            {
+                "version": 13,
+                "type": "timing",
+                "record": asdict(_timing_record()),
+            },
             timing,
         ),
         (
@@ -1375,7 +1443,9 @@ def test_timing_identity_strings_are_opaque_like_execution_events() -> None:
 @pytest.mark.parametrize(
     "started_at", [None, True, "1.0", -1, float("nan"), float("inf"), 10**400]
 )
-def test_child_rejects_invalid_shared_clock(tmp_path: Path, started_at: object) -> None:
+def test_child_rejects_invalid_shared_clock(
+    tmp_path: Path, started_at: object
+) -> None:
     request = cast(
         dict[str, object],
         json.loads(
@@ -1397,7 +1467,9 @@ def test_child_rejects_invalid_shared_clock(tmp_path: Path, started_at: object) 
     assert "invalid child time" in response.error.message
 
 
-def test_nested_processes_stream_timings_on_the_root_clock(tmp_path: Path) -> None:
+def test_nested_processes_stream_timings_on_the_root_clock(
+    tmp_path: Path,
+) -> None:
     branch = _bridge_project(tmp_path, "external/child", "child_project.main")
     child = _child_project(branch / "external")
     output = _output(tmp_path, "timing")
@@ -1435,13 +1507,19 @@ def test_nested_processes_stream_timings_on_the_root_clock(tmp_path: Path) -> No
         assert record.duration_seconds >= 0
     assert len(timings) == len({record.path for record in timings})
     trace = (output / "trace").read_text("utf-8").splitlines()
-    starts = [line.split(" START ", 1)[1] for line in trace if " START " in line]
+    starts = [
+        line.split(" START ", 1)[1] for line in trace if " START " in line
+    ]
     ends = [
         line.split(" END ", 1)[1].split(" status=", 1)[0]
         for line in trace
         if " END " in line
     ]
-    assert sorted(starts) == sorted(ends) == sorted(record.path for record in timings)
+    assert (
+        sorted(starts)
+        == sorted(ends)
+        == sorted(record.path for record in timings)
+    )
     for line in trace:
         elapsed = float(line.split(" +", 1)[1].split("s]", 1)[0])
         assert elapsed >= 20
@@ -1502,7 +1580,9 @@ def test_child_transport_error_visits_its_failure_marker(
     def reject_transport(_value: object, /) -> NoReturn:
         raise TypeError("test output is not transportable")
 
-    monkeypatch.setattr("verdog_runtime.child.encode_payload", reject_transport)
+    monkeypatch.setattr(
+        "verdog_runtime._protocol.encode_payload", reject_transport
+    )
     response = _serve(
         {
             "version": 13,
@@ -1532,13 +1612,13 @@ def test_child_transport_error_visits_its_failure_marker(
         and event.status == "failed"
         for event in events
     ), events
-    stack = (call / "failure/000001/stacktrace.txt").read_text(
-        "utf-8"
-    )
+    stack = (call / "failure/000001/stacktrace.txt").read_text("utf-8")
     assert "TypeError: test output is not transportable" in stack
     assert "Verdog check: entity=exit" in stack
     assert "Verdog failure boundary:" in stack
-    timings = [event.record for event in events if isinstance(event, TimingFrame)]
+    timings = [
+        event.record for event in events if isinstance(event, TimingFrame)
+    ]
     exit_timings = [record for record in timings if record.node_id == "exit"]
     assert [record.status for record in exit_timings] == ["failed"]
     assert exit_timings[0].duration_seconds >= 0
@@ -1568,7 +1648,7 @@ def test_child_success_encodes_its_output_once(
         encoded.append(value)
         return encode(value)
 
-    monkeypatch.setattr("verdog_runtime.child.encode_payload", count)
+    monkeypatch.setattr("verdog_runtime._protocol.encode_payload", count)
     response = _serve(
         {
             "version": 13,
@@ -1639,7 +1719,9 @@ def test_project_dataclasses_cross_both_process_directions_by_value(
         encoding="utf-8",
     )
     monkeypatch.setattr(sys, "path", [str(tmp_path / "src"), *sys.path])
-    parent_module = cast(Any, importlib.import_module(f"{package_name}.payload"))
+    parent_module = cast(
+        Any, importlib.import_module(f"{package_name}.payload")
+    )
     parent_value = parent_module.ParentOnly(17)
 
     echoed = (
@@ -1689,12 +1771,16 @@ def test_remote_checkpoint_references_are_captured_before_child_continues(
         @override
         def _accept_remote_checkpoint(self, *args: Any, **kwargs: Any) -> None:
             frame = cast(CheckpointFrame, args[1])
-            first = frame.completed is not None and frame.completed.node == "first"
+            first = (
+                frame.completed is not None and frame.completed.node == "first"
+            )
             if first:
                 deadline = time.monotonic() + 10
                 while not list(output.rglob("later.txt")):
                     if time.monotonic() >= deadline:
-                        raise AssertionError("child did not continue before checkpoint commit")
+                        raise AssertionError(
+                            "child did not continue before checkpoint commit"
+                        )
                     time.sleep(0.01)
             super()._accept_remote_checkpoint(*args, **kwargs)
             if first:
@@ -1711,7 +1797,8 @@ def test_remote_checkpoint_references_are_captured_before_child_continues(
     assert list(output.rglob("later.txt"))
     store = RunStore.open(output)
     checkpoint = next(
-        item for item in store.checkpoints()
+        item
+        for item in store.checkpoints()
         if item.completed is not None and item.completed.node == "first"
     )
     directory = store.checkpoint_directory(checkpoint.sequence)
@@ -1739,8 +1826,10 @@ def test_durable_workflow_checkpoint_resumes_inside_the_isolated_child(
             "if _LegacyPath('legacy-output-layout').exists():\n"
             "    import sys as _legacy_sys\n"
             f"    _legacy_sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
-            "    from layout_helpers import legacy_graph_create as _legacy_create\n"
-            "    from verdog_runtime.interpreter.execution import _GraphOutput\n"
+            "    from layout_helpers import "
+            "legacy_graph_create as _legacy_create\n"
+            "    from verdog_runtime.interpreter.execution "
+            "import _GraphOutput\n"
             "    _GraphOutput.create = classmethod(_legacy_create)\n"
             + source.read_text("utf-8"),
             encoding="utf-8",
@@ -1751,7 +1840,9 @@ def test_durable_workflow_checkpoint_resumes_inside_the_isolated_child(
         if legacy_layout:
             original_register = Dispatcher._register_workflow_activation  # pyright: ignore[reportPrivateUsage]
 
-            def legacy_register(dispatcher: Dispatcher, parent: Any, call: Any, /) -> None:
+            def legacy_register(
+                dispatcher: Dispatcher, parent: Any, call: Any, /
+            ) -> None:
                 visit = Path(call.visit_path)
                 path = visit.with_name(f"{visit.name}-child-legacy")
                 (parent.graph_output.root / path).mkdir()
@@ -1762,7 +1853,9 @@ def test_durable_workflow_checkpoint_resumes_inside_the_isolated_child(
                 "verdog_runtime.interpreter.execution._GraphOutput.create",
                 classmethod(legacy_graph_create),
             )
-            legacy.setattr(Dispatcher, "_register_workflow_activation", legacy_register)
+            legacy.setattr(
+                Dispatcher, "_register_workflow_activation", legacy_register
+            )
         with pytest.raises(KeyboardInterrupt, match="first child checkpoint"):
             _InterruptAfterFirstChildCheckpoint(project_root=tmp_path).run(
                 definition,
@@ -1779,7 +1872,9 @@ def test_durable_workflow_checkpoint_resumes_inside_the_isolated_child(
     assert sequence is not None
     assert sequence == manifest.checkpoints.latest_restorable
     checkpoint_manifest = json.loads(
-        (store.checkpoint_directory(sequence) / "manifest.json").read_text("utf-8")
+        (store.checkpoint_directory(sequence) / "manifest.json").read_text(
+            "utf-8"
+        )
     )
     shard_names = {item["name"] for item in checkpoint_manifest["shards"]}
     assert "runtime.pkl" in shard_names
@@ -1787,10 +1882,14 @@ def test_durable_workflow_checkpoint_resumes_inside_the_isolated_child(
     assert (child / "first-visits").read_text("utf-8").splitlines() == ["first"]
     # The isolated process may execute ahead before parent-side cancellation,
     # but the committed child continuation still precedes the second node.
-    assert (child / "second-visits").read_text("utf-8").splitlines() == ["second"]
+    assert (child / "second-visits").read_text("utf-8").splitlines() == [
+        "second"
+    ]
 
     call_directory = (
-        output / "graph-parent.main/call/000001" if legacy_layout else output / "call/000001"
+        output / "graph-parent.main/call/000001"
+        if legacy_layout
+        else output / "call/000001"
     )
     child_output = (
         call_directory.with_name("000001-child-legacy")
@@ -1801,7 +1900,9 @@ def test_durable_workflow_checkpoint_resumes_inside_the_isolated_child(
     assert not list(call_directory.glob("attempt-*"))
 
     (child / "allow-second").touch()
-    resumed = Dispatcher(project_root=tmp_path).resume(definition, output_dir=output)
+    resumed = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
 
     assert resumed.output == 6
     assert (child / "first-visits").read_text("utf-8").splitlines() == ["first"]
@@ -1811,8 +1912,14 @@ def test_durable_workflow_checkpoint_resumes_inside_the_isolated_child(
     ]
     assert _only_call_output(output) == child_output
     assert not list(call_directory.glob("attempt-*"))
-    child_graph = child_output / "graph-child_project.main" if legacy_layout else child_output
-    assert [path.name for path in (child_graph / "enter").iterdir()] == ["000001"]
+    child_graph = (
+        child_output / "graph-child_project.main"
+        if legacy_layout
+        else child_output
+    )
+    assert [path.name for path in (child_graph / "enter").iterdir()] == [
+        "000001"
+    ]
     assert not (child_graph / "first/000002").exists()
     assert (child_graph / "second/000002").is_dir()
     assert RunStore.open(output).manifest().status is RunStatus.SUCCEEDED
@@ -1837,13 +1944,17 @@ def test_repeated_call_visits_each_contain_their_own_child_nodes(
         nodes=(call,),
         edges=(
             parent.edges[0],
-            replace(parent.edges[1], target=call.id, visit=parent.edges[0].visit),
+            replace(
+                parent.edges[1], target=call.id, visit=parent.edges[0].visit
+            ),
         ),
     )
     output = _output(tmp_path, "repeated-calls")
     # Each round consumes one caller transition and two child transitions.
     # This bound stops the loop after exactly two completed child invocations.
-    with pytest.raises(RuntimeError, match="workflow transition limit exceeded"):
+    with pytest.raises(
+        RuntimeError, match="workflow transition limit exceeded"
+    ):
         Dispatcher(project_root=tmp_path, transition_limit=6).run(
             _definition(repeated), 4, output_dir=output
         )
@@ -1855,15 +1966,23 @@ def test_repeated_call_visits_each_contain_their_own_child_nodes(
         nodes = {entry.name for entry in visit.iterdir() if entry.is_dir()}
         assert nodes == {"enter", "work", "exit"}
         for node in nodes:
-            assert [entry.name for entry in (visit / node).iterdir()] == ["000001"]
+            assert [entry.name for entry in (visit / node).iterdir()] == [
+                "000001"
+            ]
     for report in ("config.md", "stats.md"):
-        assert call_reports(output / report) == [visit / report for visit in visits]
+        assert call_reports(output / report) == [
+            visit / report for visit in visits
+        ]
     assert not (output / "activations").exists()
 
 
-def test_durable_workflow_call_can_catch_remote_child_error(tmp_path: Path) -> None:
+def test_durable_workflow_call_can_catch_remote_child_error(
+    tmp_path: Path,
+) -> None:
     child = _resumable_child_project(tmp_path)
-    definition = _definition(_durable_parent(child.name, catch_remote_error=True))
+    definition = _definition(
+        _durable_parent(child.name, catch_remote_error=True)
+    )
     output = _output(tmp_path, "remote-error-caught")
 
     result = Dispatcher(project_root=tmp_path).run(
@@ -1875,10 +1994,10 @@ def test_durable_workflow_call_can_catch_remote_child_error(tmp_path: Path) -> N
 
     assert result.output == -1
     assert (child / "first-visits").read_text("utf-8").splitlines() == ["first"]
-    assert (child / "second-visits").read_text("utf-8").splitlines() == ["second"]
-    child_failure = (
-        _only_call_output(output) / "failure/000001"
-    )
+    assert (child / "second-visits").read_text("utf-8").splitlines() == [
+        "second"
+    ]
+    child_failure = _only_call_output(output) / "failure/000001"
     assert (child_failure / "stacktrace.txt").is_file()
 
 
@@ -1902,14 +2021,20 @@ def test_resume_after_isolated_child_return_does_not_restart_child(
         )
     assert RunStore.open(output).manifest().status is RunStatus.INTERRUPTED
     assert (child / "first-visits").read_text("utf-8").splitlines() == ["first"]
-    assert (child / "second-visits").read_text("utf-8").splitlines() == ["second"]
+    assert (child / "second-visits").read_text("utf-8").splitlines() == [
+        "second"
+    ]
 
     control["enabled"] = False
-    result = Dispatcher(project_root=tmp_path).resume(definition, output_dir=output)
+    result = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
 
     assert result.output == 6
     assert (child / "first-visits").read_text("utf-8").splitlines() == ["first"]
-    assert (child / "second-visits").read_text("utf-8").splitlines() == ["second"]
+    assert (child / "second-visits").read_text("utf-8").splitlines() == [
+        "second"
+    ]
 
 
 def test_durable_workflow_fork_defers_child_state_transform_and_keeps_base(
@@ -1946,7 +2071,9 @@ def test_durable_workflow_fork_defers_child_state_transform_and_keeps_base(
     target = RunStore.open(target_output).manifest()
     assert forked.output == 6
     assert target.status is RunStatus.SUCCEEDED
-    assert RunStore.open(source_output).manifest().status is RunStatus.INTERRUPTED
+    assert (
+        RunStore.open(source_output).manifest().status is RunStatus.INTERRUPTED
+    )
     assert (child / "first-visits").read_text("utf-8").splitlines() == ["first"]
     assert (child / "second-visits").read_text("utf-8").splitlines() == [
         "second",
@@ -1957,7 +2084,9 @@ def test_durable_workflow_fork_defers_child_state_transform_and_keeps_base(
     assert (child_graph / "second/000001").is_dir()
 
 
-def test_child_source_drift_is_rejected_before_runtime_decode(tmp_path: Path) -> None:
+def test_child_source_drift_is_rejected_before_runtime_decode(
+    tmp_path: Path,
+) -> None:
     child = _resumable_child_project(tmp_path)
     definition = _definition(_durable_parent(child.name))
     output = _output(tmp_path, "remote-drift")
@@ -1974,14 +2103,18 @@ def test_child_source_drift_is_rejected_before_runtime_decode(tmp_path: Path) ->
     sequence = manifest.checkpoints.latest_restorable
     assert sequence is not None
     checkpoint_manifest = json.loads(
-        (store.checkpoint_directory(sequence) / "manifest.json").read_text("utf-8")
+        (store.checkpoint_directory(sequence) / "manifest.json").read_text(
+            "utf-8"
+        )
     )
     child_shard = next(
         item["name"]
         for item in checkpoint_manifest["shards"]
         if item["name"].startswith("children/")
     )
-    bundle = decode_child_checkpoint(store.checkpoint_shard(sequence, child_shard))
+    bundle = decode_child_checkpoint(
+        store.checkpoint_shard(sequence, child_shard)
+    )
     deliberately_undecodable = encode_child_checkpoint(
         ChildCheckpointBundle(
             compatibility=bundle.compatibility,
@@ -1992,7 +2125,9 @@ def test_child_source_drift_is_rejected_before_runtime_decode(tmp_path: Path) ->
     )
 
     source = child / "src/child_project/subroutines/main/__init__.py"
-    source.write_text(source.read_text("utf-8") + "\n# incompatible source drift\n")
+    source.write_text(
+        source.read_text("utf-8") + "\n# incompatible source drift\n"
+    )
     request = json.loads(
         _request(
             GraphId("child_project.main"),
@@ -2024,14 +2159,16 @@ def test_workflow_runs_in_a_child_process_and_returns_its_budget(
     parent = _parent(child.name, captured)
     events: list[NodeExecution | EdgeExecution] = []
 
-    result = Dispatcher(project_root=tmp_path, execution_handler=events.append).run(
-        _definition(parent), 4, output_dir=_output(tmp_path, "normal")
-    )
+    result = Dispatcher(
+        project_root=tmp_path, execution_handler=events.append
+    ).run(_definition(parent), 4, output_dir=_output(tmp_path, "normal"))
     assert isinstance(result, Success)
     assert result.output[0] == 5
     assert result.output[1] != os.getpid()
     child_events = [
-        event for event in events if event.graph_id == GraphId("child_project.main")
+        event
+        for event in events
+        if event.graph_id == GraphId("child_project.main")
     ]
     assert child_events
     assert all(event.remote and event.state is None for event in child_events)
@@ -2067,26 +2204,32 @@ def test_workflow_runs_in_a_child_process_and_returns_its_budget(
     assert isinstance(large_result, Success)
     assert large_result.output[0] == large + 1
 
-    with pytest.raises((RuntimeError, RemoteWorkflowError), match="transition limit"):
+    with pytest.raises(
+        (RuntimeError, RemoteWorkflowError), match="transition limit"
+    ):
         Dispatcher(project_root=tmp_path, transition_limit=3).run(
             _definition(parent), 4, output_dir=_output(tmp_path, "exhausted")
         )
 
-    with pytest.raises(RemoteWorkflowError, match="expected child failure") as caught:
+    with pytest.raises(
+        RemoteWorkflowError, match="expected child failure"
+    ) as caught:
         Dispatcher(project_root=tmp_path).run(
             _definition(parent), -2, output_dir=_output(tmp_path, "failed")
         )
     assert caught.value.exception_type == "builtins.ValueError"
     failed_output = _output(tmp_path, "failed")
     failed_child = _only_call_output(failed_output)
-    failed_stack = (
-        failed_child / "failure/000001/stacktrace.txt"
-    ).read_text("utf-8")
+    failed_stack = (failed_child / "failure/000001/stacktrace.txt").read_text(
+        "utf-8"
+    )
     assert "ValueError: expected child failure" in failed_stack
     assert "graph=child_project.main node=work" in failed_stack
     assert "graph=child_project.main failure=failure" in failed_stack
     for name in ("config.md", "stats.md"):
-        assert call_reports(failed_output / name) == [(failed_child / name).resolve()]
+        assert call_reports(failed_output / name) == [
+            (failed_child / name).resolve()
+        ]
         assert call_reports(failed_child / name) == []
     assert any(
         row[2:5] == ["failure", "failure", "1"]
@@ -2136,7 +2279,9 @@ def test_workflow_runs_in_a_child_process_and_returns_its_budget(
             project_root=tmp_path,
             execution_handler=events.append,
             cancellation=cancellation,
-        ).run(_definition(parent), -1, output_dir=_output(tmp_path, "cancelled"))
+        ).run(
+            _definition(parent), -1, output_dir=_output(tmp_path, "cancelled")
+        )
     canceller.join(timeout=1)
     assert cancelled_at and time.monotonic() - cancelled_at[0] < 3
 
@@ -2151,7 +2296,9 @@ def test_workflow_process_owns_defaults_and_accepts_an_immediate_override(
         output_dir=_output(tmp_path, "default-params"),
     )
     override_result = Dispatcher(project_root=tmp_path).run(
-        _definition(_parent(child.name, [], params_override=SimpleNamespace(delta=6))),
+        _definition(
+            _parent(child.name, [], params_override=SimpleNamespace(delta=6))
+        ),
         4,
         output_dir=_output(tmp_path, "override-params"),
     )
@@ -2196,7 +2343,9 @@ def _wait_until_gone(pid: int) -> None:
     deadline = time.monotonic() + 3
     while _process_exists(pid) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert not _process_exists(pid), f"child process {pid} survived cancellation"
+    assert not _process_exists(pid), (
+        f"child process {pid} survived cancellation"
+    )
 
 
 def test_blocking_child_transport_honors_a_monotonic_deadline(
@@ -2309,16 +2458,21 @@ def test_durable_workflow_cancellation_keeps_pending_start_checkpoint(
     assert manifest.status is RunStatus.INTERRUPTED
     checkpoint = manifest.checkpoints.latest_restorable
     assert checkpoint is not None
-    snapshot = decode_continuation(store.checkpoint_shard(checkpoint, "runtime.pkl"))
+    snapshot = decode_continuation(
+        store.checkpoint_shard(checkpoint, "runtime.pkl")
+    )
     call_frames = [
-        frame for frame in snapshot.frames if isinstance(frame, CallFrameSnapshot)
+        frame
+        for frame in snapshot.frames
+        if isinstance(frame, CallFrameSnapshot)
     ]
     assert len(call_frames) == 1
     call = call_frames[0]
     assert call.phase == "child_pending"
     assert call.child_call_path is None
     assert not any(
-        name.startswith("children/") for name in store.checkpoint_shards(checkpoint)
+        name.startswith("children/")
+        for name in store.checkpoint_shards(checkpoint)
     )
 
 
@@ -2411,22 +2565,24 @@ def _external_subroutine_workflow(
             project_path=branch.name,
         ),
     )
-    parent: GraphDefinition[int, tuple[int, int], None, object] = GraphDefinition(
-        id=GraphId("parent.main"),
-        params_type=type(None),
-        enter=enter,
-        exit=exit_,
-        failure=failure,
-        nodes=(call,),
-        edges=(
-            EdgeDefinition(
-                id=EdgeId("in"),
-                source=enter.id,
-                target=call.id,
-                visit=CallVisitDefinition(implementation=adapt),
+    parent: GraphDefinition[int, tuple[int, int], None, object] = (
+        GraphDefinition(
+            id=GraphId("parent.main"),
+            params_type=type(None),
+            enter=enter,
+            exit=exit_,
+            failure=failure,
+            nodes=(call,),
+            edges=(
+                EdgeDefinition(
+                    id=EdgeId("in"),
+                    source=enter.id,
+                    target=call.id,
+                    visit=CallVisitDefinition(implementation=adapt),
+                ),
+                _edge("out", call.id, exit_.id),
             ),
-            _edge("out", call.id, exit_.id),
-        ),
+        )
     )
     return _definition(parent)
 
@@ -2507,7 +2663,9 @@ def test_external_subroutine_uses_one_dispatcher_for_nested_calls(
     child_output = _only_call_output(branch_output)
     for name in ("config.md", "stats.md"):
         assert call_reports(output / name) == [(branch_output / name).resolve()]
-        assert call_reports(branch_output / name) == [(child_output / name).resolve()]
+        assert call_reports(branch_output / name) == [
+            (child_output / name).resolve()
+        ]
         assert call_reports(child_output / name) == []
         assert set(output.rglob(name)) == {
             output / name,
@@ -2515,7 +2673,10 @@ def test_external_subroutine_uses_one_dispatcher_for_nested_calls(
             child_output / name,
         }
     assert not list(output.rglob("configuration.md"))
-    assert table_rows(output / "config.md") == [["input", "4"], ["params", "None"]]
+    assert table_rows(output / "config.md") == [
+        ["input", "4"],
+        ["params", "None"],
+    ]
     for report_dir, graph_id, node_type in (
         (output, "parent.main", "subroutine_call"),
         (
@@ -2556,7 +2717,9 @@ def test_resume_continues_inside_an_external_in_process_subroutine(
     output = _output(tmp_path, "external-subroutine-resume")
     interrupted = False
 
-    def interrupt_in_external_child(event: NodeExecution | EdgeExecution) -> None:
+    def interrupt_in_external_child(
+        event: NodeExecution | EdgeExecution,
+    ) -> None:
         nonlocal interrupted
         if (
             not interrupted
@@ -2583,7 +2746,9 @@ def test_resume_continues_inside_an_external_in_process_subroutine(
     assert store.manifest().status is RunStatus.INTERRUPTED
     latest = store.manifest().checkpoints.latest_restorable
     assert latest is not None
-    snapshot = decode_continuation(store.checkpoint_shard(latest, "runtime.pkl"))
+    snapshot = decode_continuation(
+        store.checkpoint_shard(latest, "runtime.pkl")
+    )
     graph_paths = [
         frame.definition.project_path
         for frame in snapshot.frames
@@ -2591,7 +2756,9 @@ def test_resume_continues_inside_an_external_in_process_subroutine(
     ]
     assert graph_paths == [".", branch.name, f"{branch.name}/external/child"]
 
-    result = Dispatcher(project_root=tmp_path).resume(definition, output_dir=output)
+    result = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
 
     assert result.output[0] == 5
     assert store.manifest().status is RunStatus.SUCCEEDED

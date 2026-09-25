@@ -1,104 +1,102 @@
+"""Bind declared profiles and session resources to graph activations."""
+
 from __future__ import annotations
 
+import dataclasses
+import types
 from collections.abc import Mapping
-from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Any, cast
 
-from ..agents import (
-    AgentInvocationError,
-    AgentInvoker,
-    AgentSessionAction,
-    AgentSessionCapabilities,
-)
-from ..declarations import (
-    AgentAccess,
-    GraphDefinition,
-    SubroutineCall,
-)
-from ..declarations.ids import AgentProfileId, AgentSessionId, ProviderSessionId
-from ._invocations import InvocationJournal
+from verdog_runtime import agents, declarations
+from verdog_runtime.declarations import ids
+from verdog_runtime.interpreter import _invocations
 
 
-@dataclass(slots=True)
+@dataclasses.dataclass(slots=True)
 class SessionResource:
     persistent: bool
     provider: str | None = None
-    provider_session_id: ProviderSessionId | None = None
-    access: AgentAccess | None = None
+    provider_session_id: ids.ProviderSessionId | None = None
+    access: declarations.AgentAccess | None = None
     copy_on_write: bool = False
     require_copy_on_write: bool = False
     branch_supported: bool | None = None
     tainted: bool = False
 
     def resume(
-        self, session_id: AgentSessionId, provider: str, access: AgentAccess, /
-    ) -> ProviderSessionId | None:
+        self,
+        session_id: ids.AgentSessionId,
+        provider: str,
+        access: declarations.AgentAccess,
+        /,
+    ) -> ids.ProviderSessionId | None:
         if self.provider is not None and self.provider != provider:
-            raise AgentInvocationError(
+            raise agents.AgentInvocationError(
                 f"agent session {session_id} belongs to provider "
                 f"{self.provider}, not {provider}"
             )
         if self.provider_session_id is not None and self.access is not access:
-            raise AgentInvocationError(
+            raise agents.AgentInvocationError(
                 "a persistent agent session must keep one access mode"
             )
         return self.provider_session_id
 
     def request(
         self,
-        session_id: AgentSessionId,
-        profile: AgentInvoker,
-        access: AgentAccess,
+        session_id: ids.AgentSessionId,
+        profile: agents.AgentInvoker,
+        access: declarations.AgentAccess,
         /,
-    ) -> tuple[ProviderSessionId | None, AgentSessionAction]:
+    ) -> tuple[ids.ProviderSessionId | None, agents.AgentSessionAction]:
         provider = profile.session_provider
         source = self.resume(session_id, provider, access)
         if not self.persistent:
-            return source, AgentSessionAction.CONTINUE
+            return source, agents.AgentSessionAction.CONTINUE
         capabilities = getattr(
-            profile, "session_capabilities", AgentSessionCapabilities()
+            profile, "session_capabilities", agents.AgentSessionCapabilities()
         )
-        if not isinstance(capabilities, AgentSessionCapabilities):
-            raise AgentInvocationError(
-                f"agent provider {provider} returned invalid session capabilities"
+        if not isinstance(capabilities, agents.AgentSessionCapabilities):
+            raise agents.AgentInvocationError(
+                f"agent provider {provider} returned invalid "
+                f"session capabilities"
             )
         self.branch_supported = capabilities.fork_latest
         if source is None or not self.copy_on_write:
-            return source, AgentSessionAction.CONTINUE
+            return source, agents.AgentSessionAction.CONTINUE
         if capabilities.fork_latest:
-            return source, AgentSessionAction.FORK
+            return source, agents.AgentSessionAction.FORK
         if self.require_copy_on_write:
-            raise AgentInvocationError(
+            raise agents.AgentInvocationError(
                 f"agent provider {provider} cannot fork persistent session "
                 f"{session_id}; checkpointing is required"
             )
         self.copy_on_write = False
-        return source, AgentSessionAction.CONTINUE
+        return source, agents.AgentSessionAction.CONTINUE
 
     def advance(
         self,
         provider: str,
-        access: AgentAccess,
-        provider_session_id: ProviderSessionId | None,
-        action: AgentSessionAction = AgentSessionAction.CONTINUE,
-        source_provider_session_id: ProviderSessionId | None = None,
+        access: declarations.AgentAccess,
+        provider_session_id: ids.ProviderSessionId | None,
+        action: agents.AgentSessionAction = agents.AgentSessionAction.CONTINUE,
+        source_provider_session_id: ids.ProviderSessionId | None = None,
         /,
     ) -> None:
         if not self.persistent:
             return
         provider_session_id = provider_session_id or self.provider_session_id
         if provider_session_id is None:
-            raise AgentInvocationError(
+            raise agents.AgentInvocationError(
                 "a persistent agent invocation returned no session id"
             )
         if (
-            action is AgentSessionAction.FORK
+            action is agents.AgentSessionAction.FORK
             and provider_session_id == source_provider_session_id
         ):
             self.tainted = True
-            raise AgentInvocationError(
-                "a forked persistent agent invocation returned its source session id"
+            raise agents.AgentInvocationError(
+                "a forked persistent agent invocation returned "
+                "its source session id"
             )
         self.provider = provider
         self.provider_session_id = provider_session_id
@@ -106,28 +104,28 @@ class SessionResource:
         self.copy_on_write = False
 
 
-@dataclass(frozen=True, slots=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class Resources:
-    profiles: Mapping[AgentProfileId, AgentInvoker]
-    sessions: Mapping[AgentSessionId, SessionResource]
-    invocation_journal: InvocationJournal | None = None
+    profiles: Mapping[ids.AgentProfileId, agents.AgentInvoker]
+    sessions: Mapping[ids.AgentSessionId, SessionResource]
+    invocation_journal: _invocations.InvocationJournal | None = None
     invocation_epoch: int | None = None
 
 
-NO_RESOURCES = Resources(MappingProxyType({}), MappingProxyType({}))
+NO_RESOURCES = Resources(types.MappingProxyType({}), types.MappingProxyType({}))
 
 
-def invoker(value: object, label: str, /) -> AgentInvoker:
+def invoker(value: object, label: str, /) -> agents.AgentInvoker:
     provider = getattr(value, "session_provider", None)
     if not callable(value) or not isinstance(provider, str) or not provider:
         raise TypeError(
             f"{label} must be a callable AgentInvoker with a session_provider"
         )
-    return cast(AgentInvoker, value)
+    return cast(agents.AgentInvoker, value)
 
 
 def invocation_resources(
-    graph: GraphDefinition[Any, Any, Any, Any],
+    graph: declarations.GraphDefinition[Any, Any, Any, Any],
     input: object,
     params: object,
     arguments: Resources,
@@ -155,16 +153,16 @@ def invocation_resources(
         }
     )
     return Resources(
-        MappingProxyType(profiles),
-        MappingProxyType(sessions),
+        types.MappingProxyType(profiles),
+        types.MappingProxyType(sessions),
         arguments.invocation_journal,
         arguments.invocation_epoch,
     )
 
 
 def child_resource_arguments(
-    operation: SubroutineCall,
-    graph: GraphDefinition[Any, Any, Any, Any],
+    operation: declarations.SubroutineCall,
+    graph: declarations.GraphDefinition[Any, Any, Any, Any],
     caller: Resources,
     /,
 ) -> Resources:
@@ -175,22 +173,22 @@ def child_resource_arguments(
     if set(operation.session_arguments) != expected_sessions:
         raise ValueError(f"session resource arguments do not match {graph.id}")
 
-    profiles: dict[AgentProfileId, AgentInvoker] = {}
+    profiles: dict[ids.AgentProfileId, agents.AgentInvoker] = {}
     for parameter in graph.profile_parameters:
         source_id = operation.profile_arguments[parameter.id]
         if source_id not in caller.profiles:
             raise ValueError(f"caller profile resource is missing: {source_id}")
         profiles[parameter.id] = caller.profiles[source_id]
 
-    sessions: dict[AgentSessionId, SessionResource] = {}
+    sessions: dict[ids.AgentSessionId, SessionResource] = {}
     for parameter in graph.session_parameters:
         source_id = operation.session_arguments[parameter.id]
         if source_id not in caller.sessions:
             raise ValueError(f"caller session resource is missing: {source_id}")
         sessions[parameter.id] = caller.sessions[source_id]
     return Resources(
-        MappingProxyType(profiles),
-        MappingProxyType(sessions),
+        types.MappingProxyType(profiles),
+        types.MappingProxyType(sessions),
         caller.invocation_journal,
         caller.invocation_epoch,
     )

@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from verdog.local import Clone
-from verdog.runner import LifecycleRequest
-from verdog.runs import (
+from verdog_runtime.cli.local import Clone
+from verdog_runtime.cli.runner import LifecycleRequest
+from verdog_runtime.cli.runs import (
     RunCommandError,
     discover_runs,
     fork_run,
@@ -201,7 +201,7 @@ def test_checkpoint_selection_accepts_prefix_basename_and_path(
         requests.append(request)
         return 0
 
-    monkeypatch.setattr("verdog.runs.operate", operate)
+    monkeypatch.setattr("verdog_runtime.cli.runs.operate", operate)
     monkeypatch.chdir(tmp_path)
     for reference in (
         identifier,
@@ -370,7 +370,7 @@ def test_omitted_selector_counts_identified_corrupt_runs(
     capsys: pytest.CaptureFixture[str],
     include_healthy: bool,
 ) -> None:
-    import verdog.main as cli
+    import verdog_runtime.cli.main as cli
 
     clone = _clone(tmp_path)
     corrupt_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -409,7 +409,7 @@ def test_cli_registers_read_only_commands_and_emits_machine_errors(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import verdog.main as cli
+    import verdog_runtime.cli.main as cli
 
     clone = _clone(tmp_path)
 
@@ -450,7 +450,7 @@ def test_lifecycle_commands_forward_explicit_semantics(
         calls.append(request)
         return 0
 
-    monkeypatch.setattr("verdog.runs.operate", operate)
+    monkeypatch.setattr("verdog_runtime.cli.runs.operate", operate)
 
     assert resume_run(clone, reference="aaaaaaaa", retry_incomplete=True) == 0
     resume = calls[-1]

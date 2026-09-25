@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from verdog.api import Service, ServiceError
-from verdog.local import Clone, WorkspaceError
-from verdog.manage import blank_graph
+from verdog_runtime.cli.api import Service, ServiceError
+from verdog_runtime.cli.local import Clone, WorkspaceError
+from verdog_runtime.cli.manage import blank_graph
 
 
 def _clone(root: Path, package: str = "test.project") -> Clone:
@@ -39,7 +39,7 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 def test_describe_json_is_canonical_and_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from verdog import main as cli
+    from verdog_runtime.cli import main as cli
 
     clone = _clone(tmp_path / "project")
     requirements = (
@@ -104,7 +104,7 @@ def test_describe_json_is_canonical_and_read_only(
 
 
 def test_catalogue_environment_uses_packaging_normalization() -> None:
-    from verdog.requirements import (
+    from verdog_runtime.cli.requirements import (
         canonical_python_specifier,
         canonical_requirements,
     )
@@ -188,9 +188,9 @@ def test_publish_sends_the_same_canonical_description(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from verdog import main as cli
-    from verdog import manage
-    from verdog.catalogue import describe_workflow
+    from verdog_runtime.cli import main as cli
+    from verdog_runtime.cli import manage
+    from verdog_runtime.cli.catalogue import describe_workflow
 
     clone = _clone(tmp_path / "publisher", "ada.tools")
     subprocess.run(
@@ -264,7 +264,7 @@ def test_publish_sends_the_same_canonical_description(
 def test_publish_requires_head_on_the_advertised_repository_remote(
     tmp_path: Path,
 ) -> None:
-    from verdog import manage
+    from verdog_runtime.cli import manage
 
     clone = _clone(tmp_path / "publisher", "ada.tools")
     subprocess.run(["git", "add", "-A"], cwd=clone.root, check=True)
@@ -319,7 +319,7 @@ def test_publish_requires_head_on_the_advertised_repository_remote(
 def test_bump_finds_the_newest_release_by_repository_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from verdog import manage
+    from verdog_runtime.cli import manage
 
     calls: list[tuple[str | None, int | None, str | None]] = []
 
@@ -376,7 +376,7 @@ def test_bump_finds_the_newest_release_by_repository_field(
 def test_owned_unpublished_import_reads_package_before_project_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from verdog import manage
+    from verdog_runtime.cli import manage
 
     clone = _clone(tmp_path / "consumer")
     (clone.root / ".gitmodules").mkdir()
@@ -423,8 +423,8 @@ def test_owned_unpublished_import_reads_package_before_project_mutation(
 def test_import_rolls_back_when_the_exact_checkout_disagrees_with_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from verdog import manage
-    from verdog.local import git as local_git
+    from verdog_runtime.cli import manage
+    from verdog_runtime.cli.local import git as local_git
 
     source = _clone(tmp_path / "source", "actual.package")
     subprocess.run(["git", "add", "-A"], cwd=source.root, check=True)
@@ -524,7 +524,7 @@ def test_sync_and_errors_use_one_json_object_on_stdout(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from verdog import main as cli
+    from verdog_runtime.cli import main as cli
 
     clone = _clone(tmp_path / "project")
     monkeypatch.chdir(clone.root)
@@ -581,7 +581,7 @@ def test_import_json_reports_the_created_binding_without_human_stdout(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from verdog import manage
+    from verdog_runtime.cli import manage
 
     result: dict[str, Any] = {
         "status": "imported",
@@ -616,8 +616,8 @@ def test_catalogue_json_preserves_structured_service_errors(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from verdog import main as cli
-    from verdog import manage
+    from verdog_runtime.cli import main as cli
+    from verdog_runtime.cli import manage
 
     def unavailable() -> Service:
         raise ServiceError(
@@ -645,7 +645,7 @@ def test_retract_reports_the_entry_id_after_an_empty_204_response(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from verdog import manage
+    from verdog_runtime.cli import manage
 
     retracted: list[str] = []
 

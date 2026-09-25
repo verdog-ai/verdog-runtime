@@ -16,7 +16,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, cast
 
-from verdog_runtime._run_model import RUN_HISTORY_SCHEMA_VERSION
+from .._run_model import RUN_HISTORY_SCHEMA_VERSION
 
 from . import manage
 from .api import Service, ServiceError

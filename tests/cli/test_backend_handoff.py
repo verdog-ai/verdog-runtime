@@ -10,10 +10,10 @@ from urllib.request import Request
 
 import pytest
 
-from verdog import main as cli, manage
-from verdog.api import Service, ServiceError, urlopen as service_urlopen
-from verdog.local import DEFAULT_ORIGIN, Clone
-from verdog.session import Login, SessionError, account, credential, load, store
+from verdog_runtime.cli import main as cli, manage
+from verdog_runtime.cli.api import Service, ServiceError, urlopen as service_urlopen
+from verdog_runtime.cli.local import DEFAULT_ORIGIN, Clone
+from verdog_runtime.cli.session import Login, SessionError, account, credential, load, store
 
 
 def test_ephemeral_session_is_read_once_and_bound_to_its_origin(
@@ -85,7 +85,7 @@ def test_authenticated_commands_and_logout_preserve_the_terminal_session(
         requests.append(request.full_url)
         return BytesIO(b'{"user":{"login":"ada"},"entries":[]}')
 
-    monkeypatch.setattr("verdog.api.urlopen", respond)
+    monkeypatch.setattr("verdog_runtime.cli.api.urlopen", respond)
     assert cli.main(["whoami"]) == 0
     assert cli.main(["catalogue", "--json"]) == 0
     assert cli.main(["logout"]) == 0
@@ -118,7 +118,7 @@ def test_terminal_login_origin_precedence(
         assert not from_stdin
         return Login(origin, "terminal-session", "ada")
 
-    monkeypatch.setattr("verdog.session.sign_in", signed_in)
+    monkeypatch.setattr("verdog_runtime.cli.session.sign_in", signed_in)
     assert cli.main(["login", *([explicit] if explicit else [])]) == 0
     assert load().origin == expected
 
@@ -138,7 +138,7 @@ def test_backend_flag_overrides_the_inherited_origin_before_upload(
         assert request.get_header("Authorization") is None
         return BytesIO(b'{"definitions":{}}')
 
-    monkeypatch.setattr("verdog.api.urlopen", respond)
+    monkeypatch.setattr("verdog_runtime.cli.api.urlopen", respond)
     assert cli.main([
         "--backend-origin", "http://127.0.0.1:18765", "analyze", "--json",
     ]) == 0
@@ -186,7 +186,7 @@ def test_service_refuses_redirects_of_tokens_and_bodies(
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
             pass
 
-    monkeypatch.setattr("verdog.api.urlopen", service_urlopen)
+    monkeypatch.setattr("verdog_runtime.cli.api.urlopen", service_urlopen)
     with HTTPServer(("127.0.0.1", 0), Redirect) as server:
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from verdog_runtime._lifecycle import (
+from .._lifecycle import (
     ArgumentMode,
     LifecycleCommand,
     Operation,

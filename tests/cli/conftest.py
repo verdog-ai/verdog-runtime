@@ -5,7 +5,7 @@ from typing import Never
 
 import pytest
 
-from verdog import session
+from verdog_runtime.cli import session
 
 
 @pytest.fixture(autouse=True)
@@ -18,4 +18,4 @@ def isolate_service_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     def unexpected_request(*_args: object, **_kwargs: object) -> Never:
         pytest.fail("unexpected service request; mock the HTTP transport")
 
-    monkeypatch.setattr("verdog.api.urlopen", unexpected_request)
+    monkeypatch.setattr("verdog_runtime.cli.api.urlopen", unexpected_request)

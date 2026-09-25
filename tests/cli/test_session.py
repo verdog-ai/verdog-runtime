@@ -7,10 +7,10 @@ from urllib.request import Request
 
 import pytest
 
-from verdog import main as cli
-from verdog.local import Clone, write_config
-from verdog.manage import blank_graph
-from verdog.session import (
+from verdog_runtime.cli import main as cli
+from verdog_runtime.cli.local import Clone, write_config
+from verdog_runtime.cli.manage import blank_graph
+from verdog_runtime.cli.session import (
     Login, SessionError, config_home, credential, forget, load, sign_in, store,
 )
 
@@ -56,7 +56,7 @@ def test_compiler_commands_need_no_login(
         return [], 0
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("verdog.api.urlopen", respond)
+    monkeypatch.setattr("verdog_runtime.cli.api.urlopen", respond)
     monkeypatch.setattr(cli, "_type_check_json", type_check)
     assert cli.main(arguments) == 0
     assert received == [f"{configured_origin or 'https://compiler.test'}{endpoint}"]
@@ -114,7 +114,7 @@ def test_login_exchanges_a_token_without_printing_or_storing_it(
         assert not from_stdin
         return github_token
 
-    monkeypatch.setattr("verdog.api.urlopen", respond)
+    monkeypatch.setattr("verdog_runtime.cli.api.urlopen", respond)
     monkeypatch.setattr("sys.stdin", StringIO(f"{github_token}\n"))
     monkeypatch.setattr("getpass.getpass", hidden_prompt)
     arguments = ["login", origin]

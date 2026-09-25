@@ -25,8 +25,8 @@ import sys
 import tempfile
 from typing import Any, Literal, cast
 
-from verdog_runtime._file_lock import locked_file
-from verdog_runtime.declarations.ids import is_valid_definition_id
+from .._file_lock import locked_file
+from ..declarations.ids import is_valid_definition_id
 
 from .requirements import parse_requirements
 

@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Literal, cast
 
 from tabulate import tabulate
-from verdog_runtime._run_model import RUN_HISTORY_SCHEMA_VERSION
-from verdog_runtime._run_store import (
+from .._run_model import RUN_HISTORY_SCHEMA_VERSION
+from .._run_store import (
     CONTROL_DIRECTORY,
     RUN_MANIFEST,
     CheckpointSummary,

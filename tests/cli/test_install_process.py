@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from verdog.sync import _install  # pyright: ignore[reportPrivateUsage]
+from verdog_runtime.cli.sync import _install  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups and file locks")

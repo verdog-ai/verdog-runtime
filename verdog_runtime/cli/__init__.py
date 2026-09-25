@@ -11,8 +11,8 @@ from typing import Annotated, Generic, TypeAlias, TypeVar, cast, overload
 import tyro
 from typing_extensions import TypeForm
 
-from ._process import normalize_parameter_address
-from .declarations.ids import ParameterAddress
+from .._process import normalize_parameter_address
+from ..declarations.ids import ParameterAddress
 
 
 InputT = TypeVar("InputT", covariant=True)

@@ -13,7 +13,7 @@ requires-python = ">=3.12"
 dependencies = ["cloudpickle>=3.1.2", "typing-extensions>=4.13", "tyro>=1", "tabulate>=0.10", "packaging>=23.2", "ty==0.0.72"]
 
 [project.scripts]
-verdog = "verdog.main:main"
+verdog = "verdog_runtime.cli.main:main"
 
 [project.urls]
 Repository = "https://github.com/verdog-ai/verdog-runtime"
@@ -26,8 +26,7 @@ dev = ["pytest", "pyright==1.1.411", "types-tabulate"]
 testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
-include = ["verdog_runtime*", "verdog", "verdog.*"]
+include = ["verdog_runtime*"]
 
 [tool.setuptools.package-data]
 verdog_runtime = ["py.typed"]
-verdog = ["py.typed"]

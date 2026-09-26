@@ -10,11 +10,15 @@ def strict_posix_relative_parts(value: str, /) -> tuple[str, ...] | None:
     path = pathlib.PurePosixPath(value)
     if (
         not value
+        or not path.parts
         or "\0" in value
         or "\\" in value
         or path.is_absolute()
         or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
+        or any(
+            part in {"", ".", ".."} or pathlib.PureWindowsPath(part).anchor
+            for part in path.parts
+        )
     ):
         return None
     return path.parts

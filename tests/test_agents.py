@@ -1601,8 +1601,7 @@ print(provider + " stderr", file=sys.stderr)
             executable=str(executable),
             model="provider-model",
             reasoning_effort="high",
-            extra_args=("--color", "never"),
-            web_search=True,
+            extra_args=("--color", "never", "-c", 'web_search="live"'),
         )
         access = AgentAccess.READ_ONLY
         expected_session = ProviderSessionId("codex-session")
@@ -1611,8 +1610,12 @@ print(provider + " stderr", file=sys.stderr)
             executable=str(executable),
             model="provider-model",
             reasoning_effort="high",
-            extra_args=("--max-budget-usd", "1"),
-            web_search=True,
+            extra_args=(
+                "--max-budget-usd",
+                "1",
+                "--tools",
+                "Read,Glob,Grep,WebSearch,WebFetch",
+            ),
         )
         access = AgentAccess.READ_ONLY
         expected_session = ProviderSessionId("claude-session")
@@ -1704,7 +1707,7 @@ print(provider + " stderr", file=sys.stderr)
             assert command.count("--sandbox") == 1
             sandbox = len(command) - 1 - command[::-1].index("--sandbox")
             assert command[sandbox + 1] == "read-only"
-            assert "--search" in command
+            assert command[command.index("-c") + 1] == 'web_search="live"'
             if index == 0:
                 assert "resume" not in command
             else:
@@ -1717,7 +1720,7 @@ print(provider + " stderr", file=sys.stderr)
         for index, command in enumerate(arguments):
             assert command[1:3] == ["--max-budget-usd", "1"]
             assert command.count("--permission-mode") == 1
-            assert command.count("--tools") == 1
+            assert command.count("--tools") == 2
             permission = (
                 len(command) - 1 - command[::-1].index("--permission-mode")
             )
@@ -1740,6 +1743,8 @@ print(provider + " stderr", file=sys.stderr)
         (CodexInvoker, ("--sandbox", "danger-full-access")),
         (CodexInvoker, ("--cd", "/tmp")),
         (CodexInvoker, ("fork",)),
+        (CodexInvoker, ("--",)),
+        (ClaudeInvoker, ("--",)),
         (CodexInvoker, ("resume",)),
         (ClaudeInvoker, ("--fork-session",)),
         (ClaudeInvoker, ("--permission-mode=bypassPermissions",)),
@@ -2094,18 +2099,70 @@ def test_replayed_reply_advances_a_restored_copy_on_write_session_once(
     assert len(invoker.requests) == 2
 
 
-def test_web_search_is_off_unless_the_profile_opts_in(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "extra_args",
+    (
+        ("--tools", "Read,Glob,Grep,WebSearch,WebFetch"),
+        ("--tools=Read,WebSearch",),
+        ("--tools", "Read", "WebSearch", "WebFetch"),
+        ("--tools", "Read WebSearch"),
+        ("--tools", ""),
+    ),
+)
+def test_read_only_claude_accepts_tool_arguments(
+    tmp_path: Path, extra_args: tuple[str, ...]
+) -> None:
+    command = ClaudeInvoker(extra_args=extra_args)._command(  # pyright: ignore[reportPrivateUsage]
+        _provider_request(tmp_path)
+    )
+    assert command[2 : 2 + len(extra_args)] == list(extra_args)
+    assert command[-4:-1] == ["--permission-mode", "plan", "--tools"]
+    assert set(command[-1].replace(",", " ").split()) <= {
+        "Read",
+        "Glob",
+        "Grep",
+        "WebSearch",
+        "WebFetch",
+    }
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    (
+        ("--tools", "Bash"),
+        ("--tools=Read,Edit",),
+        ("--tools", "default"),
+        ("--tools", "WebSearch", "Write"),
+        ("--tools", "Bash", "--tools", "Read"),
+        ("--tools",),
+    ),
+)
+def test_read_only_claude_rejects_unsafe_or_missing_tools(
+    tmp_path: Path, extra_args: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValueError):
+        ClaudeInvoker(extra_args=extra_args)._command(  # pyright: ignore[reportPrivateUsage]
+            _provider_request(tmp_path)
+        )
+
+
+def test_claude_tool_defaults_follow_request_access(tmp_path: Path) -> None:
     request = _provider_request(tmp_path)
-    claude = ClaudeInvoker()._command(request)  # pyright: ignore[reportPrivateUsage]
-    assert claude[claude.index("--tools") + 1] == "Read,Glob,Grep"
-    searching = ClaudeInvoker(web_search=True)._command(request)  # pyright: ignore[reportPrivateUsage]
-    assert (
-        searching[searching.index("--tools") + 1]
-        == "Read,Glob,Grep,WebSearch,WebFetch"
+    command = ClaudeInvoker()._command(request)  # pyright: ignore[reportPrivateUsage]
+    assert command[command.index("--tools") + 1] == "Read,Glob,Grep"
+    writable = replace(request, access=AgentAccess.WORKSPACE_WRITE)
+    command = ClaudeInvoker(extra_args=("--tools", "Read,Edit"))._command(  # pyright: ignore[reportPrivateUsage]
+        writable
     )
-    codex = CodexInvoker()._command(request, tmp_path / "last.txt")  # pyright: ignore[reportPrivateUsage]
-    assert "--search" not in codex
-    searching_codex = CodexInvoker(web_search=True)._command(  # pyright: ignore[reportPrivateUsage]
-        request, tmp_path / "last.txt"
-    )
-    assert "--search" in searching_codex
+    assert command[command.index("--tools") + 1] == "Read,Edit"
+    assert command[command.index("--permission-mode") + 1] == "acceptEdits"
+
+
+def test_claude_keeps_tool_restriction_after_flag_looking_prompt(
+    tmp_path: Path,
+) -> None:
+    command = ClaudeInvoker(
+        extra_args=("--append-system-prompt", "--tools=Read")
+    )._command(_provider_request(tmp_path))  # pyright: ignore[reportPrivateUsage]
+    assert command[2:4] == ["--append-system-prompt", "--tools=Read"]
+    assert command[-4:] == ["--permission-mode", "plan", "--tools", "Read"]

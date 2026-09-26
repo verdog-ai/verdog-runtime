@@ -168,7 +168,10 @@ def terminate_process_tree(
     owns_group: bool,
 ) -> None:
     """Stop a blocking child and every process it started, then reap it."""
-    if process.poll() is not None:
+    # An exited group leader may still have live descendants. Nested children
+    # share their caller's group, so only an owned POSIX group can be signalled
+    # after its leader exits.
+    if process.poll() is not None and (not owns_group or os.name == "nt"):
         return
     if os.name == "nt":
         with contextlib.suppress(OSError):

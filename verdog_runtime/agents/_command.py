@@ -39,8 +39,10 @@ def validate_extra_args(
         if not isinstance(argument, str):
             raise TypeError(message)
         option = argument.partition("=")[0]
-        if option in reserved or any(
-            option.startswith(candidate) for candidate in short
+        if (
+            option == "--"
+            or option in reserved
+            or any(option.startswith(candidate) for candidate in short)
         ):
             raise ValueError(
                 f"{provider} extra_args may not override runtime "

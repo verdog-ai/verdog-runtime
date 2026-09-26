@@ -304,15 +304,25 @@ def test_preserves_independent_fresh_fork_availability(tmp_path: Path) -> None:
     assert not reopened.fork_with_fresh_available
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../outside",
+        ".",
+        "D:/outside.pkl",
+        "D:outside.pkl",
+        "child/D:outside.pkl",
+    ],
+)
 def test_invalid_shards_never_publish_a_partial_checkpoint(
-    tmp_path: Path,
+    tmp_path: Path, name: str
 ) -> None:
     store = _store(tmp_path)
 
     with pytest.raises(
         RunStoreError, match="unsafe checkpoint shard"
     ) as captured:
-        store.commit_checkpoint(_checkpoint(1), shards={"../outside": b"no"})
+        store.commit_checkpoint(_checkpoint(1), shards={name: b"no"})
     assert captured.value.code == "checkpoint.shard_invalid"
     assert not store.checkpoint_directory(1).exists()
     assert not tuple((store.control_dir / "staging").iterdir())
@@ -686,7 +696,16 @@ def test_resume_validation_seeds_capture_cache(
 
 
 @pytest.mark.parametrize(
-    "unsafe_path", ["../escape", "node/.verdog/workspace/file", ".verdog/file"]
+    "unsafe_path",
+    [
+        "../escape",
+        "node/.verdog/workspace/file",
+        ".verdog/file",
+        ".",
+        "D:/outside.pkl",
+        "D:outside.pkl",
+        "child/D:outside.pkl",
+    ],
 )
 def test_artifact_capture_and_materialization_reject_unsafe_paths(
     tmp_path: Path, unsafe_path: str

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 from typing import cast
 
@@ -24,8 +25,6 @@ class ClaudeInvoker:
     model: str | None = None
     reasoning_effort: str | None = None
     extra_args: tuple[str, ...] = ()
-    # Read-only agents get WebSearch and WebFetch only when the profile opts in.
-    web_search: bool = False
 
     def __post_init__(self) -> None:
         """Reject extra arguments that override runtime invocation flags."""
@@ -47,7 +46,6 @@ class ClaudeInvoker:
                 "--print",
                 "--resume",
                 "--session-id",
-                "--tools",
                 "--verbose",
                 "--worktree",
                 "-c",
@@ -96,11 +94,37 @@ class ClaudeInvoker:
         if self.reasoning_effort is not None:
             command.extend(("--effort", self.reasoning_effort))
         if request.access is declarations.AgentAccess.READ_ONLY:
-            tools = (
-                "Read,Glob,Grep,WebSearch,WebFetch"
-                if self.web_search
-                else "Read,Glob,Grep"
+            # Tool selection is a provider argument; read-only access still
+            # excludes editing and command execution, including repeated lists.
+            parser = argparse.ArgumentParser(
+                add_help=False, allow_abbrev=False, exit_on_error=False
             )
+            parser.add_argument("--tools", nargs="+", action="extend")
+            try:
+                options, _ = parser.parse_known_args(self.extra_args)
+            except argparse.ArgumentError as error:
+                raise ValueError(f"claude extra_args: {error}") from error
+            tool_values = cast(list[str] | None, options.tools)
+            tools = (
+                "Read,Glob,Grep"
+                if tool_values is None
+                else ",".join(tool_values)
+            )
+            selected = set(tools.replace(",", " ").split())
+            unsupported = selected - {
+                "Read",
+                "Glob",
+                "Grep",
+                "WebSearch",
+                "WebFetch",
+            }
+            if unsupported:
+                raise ValueError(
+                    "claude tools are not allowed for read-only requests: "
+                    + ", ".join(sorted(unsupported))
+                )
+            # A provider option may consume a flag-looking value that argparse
+            # recognizes. Always emit the validated restriction ourselves.
             command.extend(("--permission-mode", "plan", "--tools", tools))
         else:
             command.extend(("--permission-mode", "acceptEdits"))

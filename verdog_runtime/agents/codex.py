@@ -26,8 +26,6 @@ class CodexInvoker:
     model: str | None = None
     reasoning_effort: str | None = None
     extra_args: tuple[str, ...] = ()
-    # Enables Codex's native web_search tool when the profile opts in.
-    web_search: bool = False
 
     def __post_init__(self) -> None:
         """Reject extra arguments that override runtime invocation flags."""
@@ -98,8 +96,6 @@ class CodexInvoker:
             )
         if not request.persistent:
             command.append("--ephemeral")
-        if self.web_search:
-            command.append("--search")
         command.extend(("--sandbox", str(request.access)))
         if request.provider_session_id is not None:
             subcommand = (

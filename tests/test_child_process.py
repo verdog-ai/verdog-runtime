@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -19,6 +20,7 @@ from layout_helpers import legacy_graph_create
 from report_helpers import call_reports, table_rows
 
 import verdog_runtime
+from verdog_runtime import _process
 from verdog_runtime._child_checkpoint import (
     ChildCheckpointBundle,
     decode_child_checkpoint,
@@ -2762,3 +2764,35 @@ def test_resume_continues_inside_an_external_in_process_subroutine(
 
     assert result.output[0] == 5
     assert store.manifest().status is RunStatus.SUCCEEDED
+
+
+def test_failed_child_exit_cleans_its_owned_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child = _child_project(tmp_path)
+    output = _output(tmp_path, "failed-cleanup")
+    (output / "call").mkdir(parents=True)
+    (output / "trace").touch()
+    calls: list[tuple[int | None, bool]] = []
+    cleanup = _process.cleanup_after_interruption
+
+    def record(process: subprocess.Popen[bytes], *, owns_group: bool) -> None:
+        calls.append((process.poll(), owns_group))
+        cleanup(process, owns_group=owns_group)
+
+    monkeypatch.delenv("_VERDOG_PROCESS_TREE", raising=False)
+    monkeypatch.setattr(_process, "cleanup_after_interruption", record)
+    with pytest.raises(RuntimeError, match="child exited with 17"):
+        invoke_child(
+            project_root=tmp_path,
+            project_path=child.name,
+            definition_id=GraphId("child_project.main"),
+            definition_module="child_project.workflows.main",
+            input=-4,
+            run_id=RunId("failed-cleanup"),
+            transitions_remaining=10,
+            output_dir=output,
+            call_path=Path("call"),
+            owner_project_path=".",
+        )
+    assert calls == [(17, True)]

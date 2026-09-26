@@ -572,6 +572,14 @@ def invoke(
         )
         _wait_for_process(process, check_cancelled, deadline)
         returncode = process.returncode
+        if returncode != 0:
+            raise RuntimeError(f"{_detail(returncode)} [child_process_failed]")
+        if protocol_error is not None or terminal is None:
+            error = protocol_error or ValueError("child wrote no result")
+            raise RuntimeError(
+                f"invalid child response: {error}; {_detail(returncode)} "
+                "[child_process_failed]"
+            ) from error
     except BaseException:
         _process.cleanup_after_interruption(process, owns_group=owns_group)
         raise
@@ -583,14 +591,6 @@ def invoke(
         if not input_stream.closed:
             input_stream.close()
         output_stream.close()
-    if returncode != 0:
-        raise RuntimeError(f"{_detail(returncode)} [child_process_failed]")
-    if protocol_error is not None or terminal is None:
-        error = protocol_error or ValueError("child wrote no result")
-        raise RuntimeError(
-            f"invalid child response: {error}; {_detail(returncode)} "
-            "[child_process_failed]"
-        ) from error
     if isinstance(terminal, protocol_module.ErrorFrame):
         raise declarations.RemoteWorkflowError(
             terminal.error.exception_type,

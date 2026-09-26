@@ -428,7 +428,9 @@ def _session_state(
     )
 
 
-def load_run(output_dir: pathlib.Path) -> LoadedRun:
+def _read_run_header(
+    output_dir: pathlib.Path,
+) -> tuple[_run_model.RunHeader, dict[str, Any], FileSignature, int]:
     output = output_dir.resolve()
     path = existing_control_directory(output) / _run_model.RUN_MANIFEST
     value, signature = _read_manifest(path, code="run.manifest_unreadable")
@@ -448,25 +450,7 @@ def load_run(output_dir: pathlib.Path) -> LoadedRun:
             code="run.manifest_invalid",
             details={"path": str(path), "field": "status"},
         ) from error
-    compatibility_value = value.get("compatibility", {})
-    if not isinstance(compatibility_value, dict) or not all(
-        isinstance(key, str) and isinstance(item, str)
-        for key, item in cast(dict[object, object], compatibility_value).items()
-    ):
-        raise _run_model.RunStoreError(
-            f"run metadata has invalid compatibility data: {path}",
-            code="run.manifest_invalid",
-            details={"path": str(path), "field": "compatibility"},
-        )
-    launch = _launch(value, path)
-    legacy_sessions = _run_model.SessionState()
-    if version == _run_model.SCHEMA_VERSION:
-        # Validate the old shape, but never trust its cached checkpoint state.
-        # Its session cache is needed only because v1 checkpoints did not yet
-        # carry their own session summary.
-        _checkpoint_state(value, path)
-        legacy_sessions = _session_state(value, path)
-    manifest = _run_model.RunManifest(
+    header = _run_model.RunHeader(
         id=_string(value, "id", path),
         project_root=_string(value, "project_root", path),
         directory_name=(
@@ -479,17 +463,63 @@ def load_run(output_dir: pathlib.Path) -> LoadedRun:
         started_at=_string(value, "started_at", path),
         updated_at=_string(value, "updated_at", path),
         output_dir=_string(value, "output_dir", path),
-        launch=launch,
+        launch=_launch(value, path),
         parent=_parent(value, path),
-        compatibility=cast(dict[str, str], compatibility_value),
-        storage_schema_version=version,
     )
-    if pathlib.Path(manifest.output_dir).resolve() != output:
+    if pathlib.Path(header.output_dir).resolve() != output:
         raise _run_model.RunStoreError(
             f"run metadata names a different output directory: {path}",
             code="run.output_mismatch",
-            details={"path": str(path), "output_dir": manifest.output_dir},
+            details={"path": str(path), "output_dir": header.output_dir},
         )
+    return header, value, signature, version
+
+
+def load_run_header(output_dir: pathlib.Path) -> _run_model.RunHeader:
+    """Read recorded identity and status without inspecting stored history.
+
+    The caller may compare ``project_root`` with its project and use
+    ``run_is_active`` to distinguish a running process from an interrupted run.
+    ``updated_at`` is the timestamp in run.json, not the latest checkpoint time.
+    """
+    return _read_run_header(output_dir)[0]
+
+
+def load_run(output_dir: pathlib.Path) -> LoadedRun:
+    output = output_dir.resolve()
+    header, value, signature, version = _read_run_header(output)
+    path = output / _run_model.CONTROL_DIRECTORY / _run_model.RUN_MANIFEST
+    compatibility_value = value.get("compatibility", {})
+    if not isinstance(compatibility_value, dict) or not all(
+        isinstance(key, str) and isinstance(item, str)
+        for key, item in cast(dict[object, object], compatibility_value).items()
+    ):
+        raise _run_model.RunStoreError(
+            f"run metadata has invalid compatibility data: {path}",
+            code="run.manifest_invalid",
+            details={"path": str(path), "field": "compatibility"},
+        )
+    legacy_sessions = _run_model.SessionState()
+    if version == _run_model.SCHEMA_VERSION:
+        # Validate the old shape, but never trust its cached checkpoint state.
+        # Its session cache is needed only because v1 checkpoints did not yet
+        # carry their own session summary.
+        _checkpoint_state(value, path)
+        legacy_sessions = _session_state(value, path)
+    manifest = _run_model.RunManifest(
+        id=header.id,
+        project_root=header.project_root,
+        directory_name=header.directory_name,
+        workflow=header.workflow,
+        status=header.status,
+        started_at=header.started_at,
+        updated_at=header.updated_at,
+        output_dir=header.output_dir,
+        launch=header.launch,
+        parent=header.parent,
+        compatibility=cast(dict[str, str], compatibility_value),
+        storage_schema_version=version,
+    )
     try:
         index = loaded_checkpoint_index(output)
     except _run_model.RunStoreError as error:
@@ -526,7 +556,9 @@ def load_run(output_dir: pathlib.Path) -> LoadedRun:
         manifest=dataclasses.replace(
             manifest,
             updated_at=updated_at,
-            checkpoints=checkpoint_state(summaries, launch.checkpointing),
+            checkpoints=checkpoint_state(
+                summaries, header.launch.checkpointing
+            ),
             sessions=sessions,
         ),
         checkpoints=checkpoints,

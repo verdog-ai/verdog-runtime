@@ -8,6 +8,7 @@ import enum
 import pathlib
 import types
 from collections.abc import Mapping
+from typing import override
 
 # The registry and legacy run manifests retain their original schema. Public
 # run-history documents and current storage manifests evolve independently
@@ -152,7 +153,9 @@ class SessionState:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class RunManifest:
+class RunHeader:
+    """Run identity and recorded status, without checkpoint-derived state."""
+
     id: str
     project_root: str
     directory_name: str
@@ -163,6 +166,26 @@ class RunManifest:
     output_dir: str
     launch: LaunchRecord
     parent: ParentRun | None = None
+
+    def as_summary(
+        self, *, status: RunStatus | None = None
+    ) -> dict[str, object]:
+        """Return metadata suitable for inexpensive run monitoring."""
+        return {
+            "id": self.id,
+            "directory_name": self.directory_name,
+            "workflow": self.workflow.as_json(),
+            "status": (self.status if status is None else status).value,
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "output_dir": self.output_dir,
+            "launch": self.launch.as_json(),
+            "parent": None if self.parent is None else self.parent.as_json(),
+        }
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RunManifest(RunHeader):
     checkpoints: CheckpointState = CheckpointState()
     sessions: SessionState = SessionState()
     compatibility: Mapping[str, str] = EMPTY_COMPATIBILITY
@@ -192,18 +215,13 @@ class RunManifest:
             value["sessions"] = self.sessions.as_json()
         return value
 
+    @override
     def as_summary(
         self, *, status: RunStatus | None = None
     ) -> dict[str, object]:
-        value = self.as_json()
-        value.pop("schema_version")
-        value.pop("project_root")
-        value.pop("compatibility")
-        value["directory_name"] = self.directory_name
+        value = RunHeader.as_summary(self, status=status)
         value["checkpoints"] = self.checkpoints.as_json()
         value["sessions"] = self.sessions.as_json()
-        if status is not None:
-            value["status"] = status.value
         return value
 
 

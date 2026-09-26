@@ -37,6 +37,22 @@ through provider-native `extra_args` instead: Codex uses `-c` and
 Regenerate sources with an updated backend using `verdog generate` before using
 runtime 0.1.3, including sources that previously passed `web_search=False`.
 
+## Run monitoring
+
+`verdog_runtime.runs.load_run_header(output_dir)` returns a validated `RunHeader`
+with run identity, launch information, and the status recorded in `run.json`.
+It does not enumerate checkpoints, load their manifests, or inspect artifacts.
+Its `updated_at` is the recorded run timestamp; checkpoint activity is reported
+by `trace.log` independently. `RunHeader.as_summary()` omits checkpoint and
+session summaries.
+
+Use `run_is_active(output_dir)` to check the existing runtime lease. The operating
+system releases that lock when the process exits, including forced termination;
+a recorded `running` status without the lease therefore indicates interruption.
+Monitoring clients must check `header.project_root` against their project before
+displaying a run. Full `RunStore` reads retain checkpoint validation for explicit
+inspection, resume, and fork.
+
 ## Development
 
 ```sh

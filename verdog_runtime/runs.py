@@ -7,9 +7,11 @@ from verdog_runtime._lifecycle import SessionMode as SessionMode
 from verdog_runtime._lifecycle import (
     encode_lifecycle_command as encode_lifecycle_command,
 )
+from verdog_runtime._run_metadata import load_run_header as load_run_header
 from verdog_runtime._run_model import (
     RUN_HISTORY_SCHEMA_VERSION as RUN_HISTORY_SCHEMA_VERSION,
 )
+from verdog_runtime._run_model import RunHeader as RunHeader
 from verdog_runtime._run_store import CONTROL_DIRECTORY as CONTROL_DIRECTORY
 from verdog_runtime._run_store import RUN_MANIFEST as RUN_MANIFEST
 from verdog_runtime._run_store import Boundary as Boundary
@@ -32,12 +34,14 @@ __all__ = [
     "Operation",
     "RUN_HISTORY_SCHEMA_VERSION",
     "RUN_MANIFEST",
+    "RunHeader",
     "RunManifest",
     "RunStatus",
     "RunStore",
     "RunStoreError",
     "SessionMode",
     "encode_lifecycle_command",
+    "load_run_header",
     "registered_runs",
     "run_is_active",
 ]

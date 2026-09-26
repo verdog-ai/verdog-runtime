@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -13,6 +16,7 @@ import pytest
 
 import verdog_runtime._artifact_references as artifact_references
 import verdog_runtime._run_metadata as run_metadata
+import verdog_runtime.runs as runs
 from verdog_runtime._run_store import (
     Boundary,
     CheckpointKind,
@@ -116,6 +120,135 @@ def test_create_writes_versioned_metadata_and_registers_custom_output(
     updated = store.update(status=RunStatus.SUCCEEDED)
     assert updated.status is RunStatus.SUCCEEDED
     assert updated.updated_at >= manifest.updated_at
+
+
+def test_forced_process_exit_releases_lease_without_updating_header(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    worker = """
+import pathlib
+import sys
+import time
+from verdog_runtime.runs import RunStore
+
+with RunStore(pathlib.Path(sys.argv[1])).lease():
+    time.sleep(60)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", worker, str(store.output_dir)],
+        cwd=Path(__file__).resolve().parents[1],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not runs.run_is_active(store.output_dir):
+            assert process.poll() is None, "lease owner exited before locking"
+            assert time.monotonic() < deadline, (
+                "lease owner did not acquire lock"
+            )
+            time.sleep(0.01)
+        assert (
+            runs.load_run_header(store.output_dir).status is RunStatus.RUNNING
+        )
+        process.kill()
+        process.wait(timeout=5)
+        assert not runs.run_is_active(store.output_dir)
+        assert (
+            runs.load_run_header(store.output_dir).status is RunStatus.RUNNING
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_run_header_never_reads_checkpoint_or_artifact_inventories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
+) -> None:
+    store = _store(tmp_path)
+    if version == 1:
+        store.save(replace(store.manifest(), storage_schema_version=1))
+    for sequence in range(1, 65):
+        directory = store.checkpoint_directory(sequence)
+        directory.mkdir()
+        (directory / "manifest.json").write_text("broken", encoding="utf-8")
+    with pytest.raises(RunStoreError):
+        load_run_manifest(store.output_dir)
+
+    def no_inventory(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("reading a run header must not enumerate stored history")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_metadata, "loaded_checkpoint_index", no_inventory)
+        patch.setattr(
+            artifact_references, "decode_artifact_references", no_inventory
+        )
+        patch.setattr(os, "scandir", no_inventory)
+        header = runs.load_run_header(store.output_dir)
+        assert header.project_root == str(tmp_path / "project")
+        assert header.workflow.id == "main"
+        assert header.updated_at == "2026-09-17T10:00:00Z"
+        assert header.status is RunStatus.RUNNING
+        assert header.directory_name == store.output_dir.name
+        assert "checkpoints" not in header.as_summary()
+        assert "sessions" not in header.as_summary()
+        assert (
+            header.as_summary(status=RunStatus.INTERRUPTED)["status"]
+            == "interrupted"
+        )
+        with store.lease():
+            assert runs.run_is_active(store.output_dir)
+        assert not runs.run_is_active(store.output_dir)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("schema_version", True, "run.schema_unsupported"),
+        ("schema_version", 99, "run.schema_unsupported"),
+        ("project_root", "", "run.manifest_invalid"),
+        ("status", "unknown", "run.manifest_invalid"),
+        ("workflow", {}, "run.manifest_invalid"),
+        ("launch", {}, "run.manifest_invalid"),
+        ("output_dir", "/different-run", "run.output_mismatch"),
+    ],
+)
+def test_run_header_uses_manifest_validation(
+    tmp_path: Path, field: str, value: object, code: str
+) -> None:
+    store = _store(tmp_path)
+    path = store.control_dir / "run.json"
+    document = json.loads(path.read_text("utf-8"))
+    document[field] = value
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(RunStoreError) as captured:
+        runs.load_run_header(store.output_dir)
+    assert captured.value.code == code
+
+
+@pytest.mark.parametrize("target", ["control", "manifest"])
+def test_run_header_refuses_symlinked_metadata(
+    tmp_path: Path, target: str
+) -> None:
+    store = _store(tmp_path)
+    path = (
+        store.control_dir
+        if target == "control"
+        else store.control_dir / "run.json"
+    )
+    moved = tmp_path / "moved-metadata"
+    path.rename(moved)
+    path.symlink_to(moved, target_is_directory=target == "control")
+    with pytest.raises(RunStoreError) as captured:
+        runs.load_run_header(store.output_dir)
+    assert captured.value.code == (
+        "run.control_invalid"
+        if target == "control"
+        else "run.manifest_unreadable"
+    )
 
 
 def test_checkpoint_commit_is_atomic_and_latest_boundary_controls_resume(

@@ -8,14 +8,14 @@ Generated projects declare `verdog-runtime` as a dependency. Install it directly
 for programmatic use:
 
 ```sh
-uv pip install 'verdog-runtime>=0.1.2'
+uv pip install 'verdog-runtime>=0.1.3'
 ```
 
 The separate [verdog-cli](https://github.com/verdog-ai/verdog-cli) package provides
 the `verdog` command and talks to the hosted backend for generation and verification:
 
 ```sh
-uv tool install --upgrade 'verdog-cli>=0.1.0'
+uv tool install --upgrade 'verdog-cli>=0.1.1'
 verdog --help
 ```
 
@@ -28,6 +28,14 @@ available from `verdog_runtime.cli`.
 The package split preserves run-history formats. Exact resume and fork still
 check runtime and environment fingerprints, so checkpoints created before the
 split require their original compatible runtime environment.
+
+Runtime 0.1.3 removes the `web_search` invoker keyword; the updated backend also
+removes the profile option.
+Remove `options.web_search` from agent profiles in `project.json`; configure search
+through provider-native `extra_args` instead: Codex uses `-c` and
+`web_search="live"`; Claude uses `--tools` and `Read,Glob,Grep,WebSearch,WebFetch`.
+Regenerate sources with an updated backend using `verdog generate` before using
+runtime 0.1.3, including sources that previously passed `web_search=False`.
 
 ## Development
 
@@ -101,9 +109,9 @@ See the [workflow declarations](verdog_runtime/declarations/README.md),
 
 ## Release
 
-[release.yml](.github/workflows/release.yml) runs when a `v*` tag is pushed,
-like `v0.1.2`. It checks that the tag matches `project.version`, runs style, tests, and
-type checks on Python 3.12, builds the wheel and source distribution, checks
+[release.yml](.github/workflows/release.yml) runs when a `v*` tag is pushed.
+It checks that the tag matches `project.version`, runs style, tests, and type checks
+on Python 3.12, builds the wheel and source distribution, checks
 the installed wheel, and publishes both distributions to PyPI.
 
 Configure this once before the first release:
@@ -121,9 +129,10 @@ release, update `project.version` in `pyproject.toml`, run `uv lock`, and commit
 those changes. Then push the matching tag:
 
 ```sh
+release_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
 git push origin main
-git tag v0.1.2
-git push origin v0.1.2
+git tag "v$release_version"
+git push origin "v$release_version"
 ```
 
 Use a new version and matching tag for each subsequent release.

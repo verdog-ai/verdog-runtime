@@ -54,10 +54,26 @@ jobs:
 
       - name: Check installed wheel
         run: |
-          uv pip install --python .venv/bin/python --no-deps --reinstall dist/*.whl
-          .venv/bin/python -I -c 'from verdog_runtime.interpreter import Dispatcher; from verdog_runtime.cli import parse_arguments; from verdog_runtime.cli.main import main; import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ("verdog", "pyverdog", "verdog_compiler", "verdog_core"))'
-          .venv/bin/python -I -m verdog_runtime.cli.main --help
-          .venv/bin/verdog --help
+          uv venv /tmp/verdog-runtime-wheel
+          uv pip install --python /tmp/verdog-runtime-wheel/bin/python dist/*.whl
+          /tmp/verdog-runtime-wheel/bin/python -I - <<'PYTHON'
+          import importlib.metadata
+          import importlib.util
+
+          from verdog_runtime.cli import parse_arguments
+          from verdog_runtime.interpreter import Dispatcher
+          from verdog_runtime.locking import locked_file
+          from verdog_runtime.runs import LifecycleCommand, RunStore
+
+          assert all(importlib.util.find_spec(name) is None for name in (
+              "verdog_cli", "verdog", "pyverdog", "verdog_compiler", "verdog_core", "ty"
+          ))
+          distribution = importlib.metadata.distribution("verdog-runtime")
+          assert not any(entry.name == "verdog" for entry in distribution.entry_points)
+          assert "verdog_runtime/cli/main.py" not in {
+              str(path) for path in distribution.files
+          }
+          PYTHON
 
       - name: Upload distributions
         uses: actions/upload-artifact@v4

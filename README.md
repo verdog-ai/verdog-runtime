@@ -1,24 +1,33 @@
 # Verdog runtime
 
-The Python runtime and command-line client for [Verdog](https://github.com/verdog-ai/verdog-website).
-It provides workflow declarations, the interpreter, agent adapters, durable run resumption,
-and the `verdog` command. Project generation and verification use the hosted backend;
-this package contains no backend or compiler implementation.
-Requires Python 3.12 or newer.
+The Python workflow runtime for [Verdog](https://github.com/verdog-ai/verdog-website).
+It provides workflow declarations, the interpreter, agent adapters, durable run
+resumption, and typed workflow argument parsing. Requires Python 3.12 or newer.
 
-Install or update the command-line client with Python 3.12 or newer:
+Generated projects declare `verdog-runtime` as a dependency. Install it directly
+for programmatic use:
 
 ```sh
-uv tool install --upgrade 'verdog-runtime>=0.1.1'
+uv pip install 'verdog-runtime>=0.1.2'
+```
+
+The separate [verdog-cli](https://github.com/verdog-ai/verdog-cli) package provides
+the `verdog` command and talks to the hosted backend for generation and verification:
+
+```sh
+uv tool install --upgrade 'verdog-cli>=0.1.0'
 verdog --help
 ```
 
-The client uses `https://157.180.79.112` by default. Use
-`verdog --backend-origin URL ...` to select another backend. Saved terminal sessions
-retain the backend used when signing in.
+The CLI depends on this runtime; the runtime does not depend on the CLI.
+Workflow environments contain the runtime and workflow dependencies. Run history
+and lifecycle transport are exposed through `verdog_runtime.runs`; advisory file
+locks through `verdog_runtime.locking`; typed workflow argument parsing remains
+available from `verdog_runtime.cli`.
 
-Generated projects also declare `verdog-runtime` as a dependency. For local development,
-install this checkout with `uv pip install .`.
+The package split preserves run-history formats. Exact resume and fork still
+check runtime and environment fingerprints, so checkpoints created before the
+split require their original compatible runtime environment.
 
 ## Development
 
@@ -67,7 +76,6 @@ Compatibility exceptions are narrow: public package facades retain re-exports;
 `TypeVar` and type-alias syntax remains where runtime introspection and checkpoint
 compatibility depend on it; dynamic dataclass access uses `getattr` explicitly.
 Tests use descriptive names and assertions instead of mandatory API docstrings.
-Delayed imports in the CLI resolve its existing command/environment dependencies.
 
 The September 2026 pass was measured against commit `e457564`, using the same
 Ruff settings for both versions:
@@ -94,7 +102,7 @@ See the [workflow declarations](verdog_runtime/declarations/README.md),
 ## Release
 
 [release.yml](.github/workflows/release.yml) runs when a `v*` tag is pushed,
-like `v0.1.1`. It checks that the tag matches `project.version`, runs style, tests, and
+like `v0.1.2`. It checks that the tag matches `project.version`, runs style, tests, and
 type checks on Python 3.12, builds the wheel and source distribution, checks
 the installed wheel, and publishes both distributions to PyPI.
 
@@ -114,13 +122,13 @@ those changes. Then push the matching tag:
 
 ```sh
 git push origin main
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 Use a new version and matching tag for each subsequent release.
 
 ## License
 
-Verdog runtime and its command-line client are licensed under the GNU Affero General Public License,
+Verdog runtime is licensed under the GNU Affero General Public License,
 version 3 only (`AGPL-3.0-only`). See [LICENSE](LICENSE).

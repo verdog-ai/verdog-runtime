@@ -7,10 +7,10 @@ import dataclasses
 import math
 import pathlib
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from typing import Literal, cast
 
-from verdog_runtime import _markdown, cancellation
+from verdog_runtime import _markdown, _usage_reports, cancellation
 
 TimingStatus = Literal["succeeded", "failed", "cancelled"]
 
@@ -143,6 +143,34 @@ class RunStatistics:
         self._scope_started_at = self.started_at
         self._record_handler = record_handler
         self._nodes: dict[tuple[str, str, str, str], tuple[int, float]] = {}
+        self._run_id: str | None = None
+        self._graph_path = pathlib.Path()
+        self._node_paths: dict[str, _usage_reports.NodeIdentity] = {}
+        self._known_node_paths: dict[str, _usage_reports.NodeIdentity] = {}
+
+    def bind(
+        self,
+        *,
+        run_id: str,
+        graph_path: pathlib.Path,
+        project_path: str,
+        graph_id: str,
+        node_paths: Mapping[str, _usage_reports.NodeIdentity],
+    ) -> None:
+        """Bind live graph identities without changing timing checkpoints."""
+        if graph_path.is_absolute() or ".." in graph_path.parts:
+            raise ValueError("statistics graph path must be run-relative")
+        if any(
+            identity[:2] != (project_path, graph_id)
+            for identity in node_paths.values()
+        ):
+            raise ValueError(
+                "statistics node identity belongs to another graph"
+            )
+        self._run_id = run_id
+        self._graph_path = graph_path
+        self._node_paths = dict(node_paths)
+        self._known_node_paths.update(node_paths)
 
     def scoped(self, output_dir: pathlib.Path) -> RunStatistics:
         scope = RunStatistics(
@@ -152,6 +180,7 @@ class RunStatistics:
         )
         scope._output_dir = output_dir
         scope._scope_started_at = time.monotonic()
+        scope._known_node_paths = self._known_node_paths
         return scope
 
     def snapshot(self) -> StatisticsSnapshot:
@@ -200,6 +229,12 @@ class RunStatistics:
         self.forward(record)
 
     def forward(self, record: TimingRecord) -> None:
+        self._known_node_paths[pathlib.Path(record.path).parent.as_posix()] = (
+            record.project_path,
+            record.graph_id,
+            record.node_id,
+            record.node_type,
+        )
         if self._record_handler is not None:
             self._record_handler(record)
 
@@ -272,26 +307,68 @@ class RunStatistics:
 
     def write(self) -> None:
         total = time.monotonic() - self._scope_started_at
+        usage = (
+            {}
+            if self._run_id is None
+            else _usage_reports.collect(
+                self.root,
+                run_id=self._run_id,
+                report_path=self._output_dir.relative_to(self.root),
+                graph_path=self._graph_path,
+                node_paths=self._node_paths,
+                known_node_paths=self._known_node_paths,
+            )
+        )
+        identities = sorted(self._nodes.keys() | usage.keys())
         nodes = _markdown.format_table(
             (
-                (*identity, count, f"{seconds:.6f}")
-                for identity, (count, seconds) in sorted(self._nodes.items())
+                (
+                    *identity,
+                    self._nodes.get(identity, (0, 0.0))[0],
+                    f"{self._nodes.get(identity, (0, 0.0))[1]:.6f}",
+                    *usage.get(identity, _usage_reports.UsageTotals()).cells(
+                        identity[3]
+                    ),
+                )
+                for identity in identities
             ),
-            ("Project", "Graph", "Node", "Type", "Visits", "Seconds"),
+            (
+                "Project",
+                "Graph",
+                "Node",
+                "Type",
+                "Visits",
+                "Seconds",
+                *_usage_reports.HEADERS,
+            ),
         )
         kinds: dict[str, tuple[int, float]] = {}
-        for (_, _, _, kind), (count, seconds) in self._nodes.items():
+        kind_usage: dict[str, _usage_reports.UsageTotals] = {}
+        total_usage = _usage_reports.UsageTotals()
+        for identity in identities:
+            kind = identity[3]
+            count, seconds = self._nodes.get(identity, (0, 0.0))
             previous_count, previous_seconds = kinds.get(kind, (0, 0.0))
             kinds[kind] = previous_count + count, previous_seconds + seconds
+            values = usage.get(identity, _usage_reports.UsageTotals())
+            kind_usage.setdefault(kind, _usage_reports.UsageTotals()).merge(
+                values
+            )
+            total_usage.merge(values)
         summary = _markdown.format_table(
             (
-                ("Total", "", f"{total:.6f}"),
+                ("Total", "", f"{total:.6f}", *total_usage.cells()),
                 *(
-                    (kind, count, f"{seconds:.6f}")
+                    (
+                        kind,
+                        count,
+                        f"{seconds:.6f}",
+                        *kind_usage[kind].cells(kind),
+                    )
                     for kind, (count, seconds) in sorted(kinds.items())
                 ),
             ),
-            ("Type", "Visits", "Seconds"),
+            ("Type", "Visits", "Seconds", *_usage_reports.HEADERS),
         )
         report = self._output_dir / "stats.md"
         calls = ""

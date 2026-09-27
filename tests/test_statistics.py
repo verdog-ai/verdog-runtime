@@ -31,6 +31,11 @@ def _rows(output_dir: Path, section: str) -> list[list[str]]:
     ]
 
 
+def _timing_rows(output_dir: Path, section: str) -> list[list[str]]:
+    width = 3 if section == "Summary" else 6
+    return [row[:width] for row in _rows(output_dir, section)]
+
+
 @pytest.mark.parametrize(
     "node_type",
     [
@@ -70,8 +75,8 @@ def test_repeated_visits_produce_compact_tables(
         "trace.log",
         "stats.md",
     }
-    kind_rows = _rows(tmp_path, "Summary")
-    node_rows = _rows(tmp_path, "Nodes")
+    kind_rows = _timing_rows(tmp_path, "Summary")
+    node_rows = _timing_rows(tmp_path, "Nodes")
     assert kind_rows[0] == ["Type", "Visits", "Seconds"]
     assert node_rows[0] == [
         "Project",
@@ -86,6 +91,15 @@ def test_repeated_visits_produce_compact_tables(
     assert node_rows[-1] == [".", "main", "work", node_type, "25", "75.000000"]
     assert len(kind_rows) == 4
     assert len(node_rows) == 3
+    zero_usage = ["0", "0", "0", "0", "0.000000"]
+    expected_usage = (
+        zero_usage
+        if node_type in ("agent", "subroutine_call", "workflow_call")
+        else ["0", "—", "—", "—", "—"]
+    )
+    assert _rows(tmp_path, "Summary")[2][3:] == zero_usage
+    assert _rows(tmp_path, "Summary")[-1][3:] == expected_usage
+    assert _rows(tmp_path, "Nodes")[-1][6:] == expected_usage
     assert len(records) == 25
     assert all(
         record.status == "succeeded" and record.duration_seconds == 3.0
@@ -129,7 +143,7 @@ def test_identity_cells_are_escaped_once_without_parsing_numeric_text(
     )
     statistics.write()
 
-    assert _rows(tmp_path, "Nodes")[2:] == [
+    assert _timing_rows(tmp_path, "Nodes")[2:] == [
         [
             "external&#124;&amp;&lt;project&gt;<br>next",
             "001",
@@ -139,7 +153,7 @@ def test_identity_cells_are_escaped_once_without_parsing_numeric_text(
             "3.250000",
         ]
     ]
-    assert _rows(tmp_path, "Summary")[3:] == [
+    assert _timing_rows(tmp_path, "Summary")[3:] == [
         ["kind&#124;&amp;&lt;type&gt;", "1", "3.250000"]
     ]
 
@@ -195,18 +209,18 @@ def test_scopes_keep_local_totals_and_forward_records_on_the_shared_clock(
         ("remote_work", 2.0),
         ("call", 12.0),
     ]
-    assert _rows(tmp_path, "Summary")[2:] == [
+    assert _timing_rows(tmp_path, "Summary")[2:] == [
         ["Total", "", "15.000000"],
         ["subroutine_call", "1", "12.000000"],
     ]
-    assert _rows(tmp_path, "Nodes")[2:] == [
+    assert _timing_rows(tmp_path, "Nodes")[2:] == [
         [".", "main", "call", "subroutine_call", "1", "12.000000"],
     ]
-    assert _rows(child_output, "Summary")[2:] == [
+    assert _timing_rows(child_output, "Summary")[2:] == [
         ["Total", "", "8.000000"],
         ["python", "1", "8.000000"],
     ]
-    assert _rows(child_output, "Nodes")[2:] == [
+    assert _timing_rows(child_output, "Nodes")[2:] == [
         ["external/child", "child", "work", "python", "1", "8.000000"],
     ]
     assert not (child_output / "trace.log").exists()
@@ -227,11 +241,11 @@ def test_empty_run_has_total_with_blank_visits(
     monkeypatch.setattr(_statistics.time, "monotonic", lambda: 3.0)
     RunStatistics(tmp_path, started_at=1.0).write()
 
-    header, separator, total = _rows(tmp_path, "Summary")
+    header, separator, total = _timing_rows(tmp_path, "Summary")
     assert header == ["Type", "Visits", "Seconds"]
     assert len(separator) == 3
     assert total == ["Total", "", "2.000000"]
-    nodes = _rows(tmp_path, "Nodes")
+    nodes = _timing_rows(tmp_path, "Nodes")
     assert len(nodes) == 2
     assert nodes[0] == ["Project", "Graph", "Node", "Type", "Visits", "Seconds"]
 
@@ -278,12 +292,15 @@ def test_snapshot_restores_aggregates_elapsed_time_and_existing_call_links(
     now = 103.0
     resumed.write()
 
-    assert _rows(tmp_path, "Summary")[2:] == [
+    assert _timing_rows(tmp_path, "Summary")[2:] == [
         ["Total", "", "8.000000"],
         ["enter", "1", "2.000000"],
         ["python", "1", "3.000000"],
     ]
-    assert [row[2] for row in _rows(tmp_path, "Nodes")[2:]] == ["enter", "work"]
+    assert [row[2] for row in _timing_rows(tmp_path, "Nodes")[2:]] == [
+        "enter",
+        "work",
+    ]
     report = (tmp_path / "stats.md").read_text("utf-8")
     assert report.count("## Calls") == 1
     assert "[child](activations/child/stats.md)" in report
@@ -316,7 +333,7 @@ def test_failed_and_cancelled_measurements_are_finalized(
     assert len(records) == 1
     assert records[0].status == status
     assert records[0].duration_seconds == 3.0
-    rows = _rows(tmp_path, "Summary")
+    rows = _timing_rows(tmp_path, "Summary")
     assert rows[-1] == ["python", "1", "3.000000"]
     assert rows[2] == ["Total", "", "3.000000"]
     assert f"END {path} status={status} duration=3.000000s" in (
@@ -351,8 +368,149 @@ def test_provider_calls_do_not_change_node_visit_count(
         )
     )
     assert len(invoker.requests) == calls
-    rows = _rows(output, "Summary")
+    rows = _timing_rows(output, "Summary")
     agents = [row for row in rows if row[:1] == ["agent"]]
     assert len(agents) == 1
     assert agents[0][1] == "1"
     assert float(agents[0][2]) >= 0.0
+    expected_usage = (
+        ["2", "unknown", "unknown", "unknown", "unknown"]
+        if calls
+        else ["0", "0", "0", "0", "0.000000"]
+    )
+    assert _rows(output, "Summary")[2][3:] == expected_usage
+    assert (
+        next(row for row in _rows(output, "Summary") if row[0] == "agent")[3:]
+        == expected_usage
+    )
+    assert (
+        next(row for row in _rows(output, "Nodes") if row[2] == "agent")[6:]
+        == expected_usage
+    )
+
+
+def test_usage_extends_existing_tables_and_survives_timing_rollback(
+    tmp_path: Path,
+) -> None:
+    from test_usage_reports import (
+        _attempt,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    _attempt(tmp_path, ".", "agent", status="failed")
+    _attempt(tmp_path, ".", "agent", visit="000002", tokens=20, cost="0.2")
+    statistics = RunStatistics(tmp_path)
+    statistics.bind(
+        run_id="current",
+        graph_path=Path(),
+        project_path=".",
+        graph_id="main",
+        node_paths={"agent": (".", "main", "agent", "agent")},
+    )
+    statistics.restore(_statistics.EMPTY_STATISTICS)
+    (tmp_path / "stats.md").write_text(
+        "old\n\n## Calls\n\n- [child](child/stats.md)\n"
+    )
+    statistics.write()
+    statistics.write()
+
+    usage_headers = [
+        "Agent calls",
+        "Input tokens",
+        "Cached input",
+        "Output tokens",
+        "Est. USD",
+    ]
+    assert _rows(tmp_path, "Nodes")[0] == [
+        "Project",
+        "Graph",
+        "Node",
+        "Type",
+        "Visits",
+        "Seconds",
+        *usage_headers,
+    ]
+    assert _rows(tmp_path, "Summary")[0] == [
+        "Type",
+        "Visits",
+        "Seconds",
+        *usage_headers,
+    ]
+    assert _rows(tmp_path, "Nodes")[2:] == [
+        [
+            ".",
+            "main",
+            "agent",
+            "agent",
+            "0",
+            "0.000000",
+            "2",
+            "30",
+            "0",
+            "15",
+            "0.300000",
+        ]
+    ]
+    total, agent = _rows(tmp_path, "Summary")[2:]
+    assert total[1] == ""
+    assert total[3:] == agent[3:] == ["2", "30", "0", "15", "0.300000"]
+    assert agent[:3] == ["agent", "0", "0.000000"]
+    report = (tmp_path / "stats.md").read_text()
+    assert report.count("## Calls") == 1
+    assert report.endswith("- [child](child/stats.md)\n")
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_parent_excludes_invocation_shaped_output_from_child_python_node(
+    tmp_path: Path, remote: bool
+) -> None:
+    from test_usage_reports import (
+        _attempt,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    from verdog_runtime._configuration import register_invocation
+
+    child_path = Path("call/000001")
+    artifact = _attempt(tmp_path, child_path.as_posix(), "work")
+    (artifact / "usage.json").unlink()
+    register_invocation(
+        tmp_path, child_path, Path(), child_path, "child", parent_report=Path()
+    )
+    statistics = RunStatistics(tmp_path)
+    statistics.bind(
+        run_id="current",
+        graph_path=Path(),
+        project_path=".",
+        graph_id="main",
+        node_paths={"call": (".", "main", "call", "workflow_call")},
+    )
+    if remote:
+        statistics.forward(
+            TimingRecord(
+                path=(child_path / "work/000001").as_posix(),
+                project_path="child",
+                graph_id="child",
+                node_id="work",
+                node_type="python",
+                status="succeeded",
+                duration_seconds=0.0,
+            )
+        )
+    else:
+        child = statistics.scoped(tmp_path / child_path)
+        child.bind(
+            run_id="current",
+            graph_path=child_path,
+            project_path="child",
+            graph_id="child",
+            node_paths={
+                (child_path / "work").as_posix(): (
+                    "child",
+                    "child",
+                    "work",
+                    "python",
+                ),
+            },
+        )
+    statistics.write()
+    assert _rows(tmp_path, "Summary")[2][3:] == ["0", "0", "0", "0", "0.000000"]
+    assert _rows(tmp_path, "Nodes")[2:] == []

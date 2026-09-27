@@ -7,7 +7,7 @@ import types
 from collections.abc import Mapping
 from typing import Any, cast
 
-from verdog_runtime import agents, declarations
+from verdog_runtime import _usage, agents, declarations
 from verdog_runtime.declarations import ids
 from verdog_runtime.interpreter import _invocations
 
@@ -22,6 +22,7 @@ class SessionResource:
     require_copy_on_write: bool = False
     branch_supported: bool | None = None
     tainted: bool = False
+    usage_snapshot: dict[str, object] | None = None
 
     def resume(
         self,
@@ -110,6 +111,7 @@ class Resources:
     sessions: Mapping[ids.AgentSessionId, SessionResource]
     invocation_journal: _invocations.InvocationJournal | None = None
     invocation_epoch: int | None = None
+    usage_scope: _usage.Scope | None = None
 
 
 NO_RESOURCES = Resources(types.MappingProxyType({}), types.MappingProxyType({}))
@@ -152,11 +154,10 @@ def invocation_resources(
             for definition in graph.sessions
         }
     )
-    return Resources(
-        types.MappingProxyType(profiles),
-        types.MappingProxyType(sessions),
-        arguments.invocation_journal,
-        arguments.invocation_epoch,
+    return dataclasses.replace(
+        arguments,
+        profiles=types.MappingProxyType(profiles),
+        sessions=types.MappingProxyType(sessions),
     )
 
 
@@ -186,9 +187,8 @@ def child_resource_arguments(
         if source_id not in caller.sessions:
             raise ValueError(f"caller session resource is missing: {source_id}")
         sessions[parameter.id] = caller.sessions[source_id]
-    return Resources(
-        types.MappingProxyType(profiles),
-        types.MappingProxyType(sessions),
-        caller.invocation_journal,
-        caller.invocation_epoch,
+    return dataclasses.replace(
+        caller,
+        profiles=types.MappingProxyType(profiles),
+        sessions=types.MappingProxyType(sessions),
     )

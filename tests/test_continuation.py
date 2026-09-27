@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Never, cast, override
@@ -364,6 +364,12 @@ def test_fork_rebases_run_paths_and_applies_session_policy(
                 access="read-only",
                 copy_on_write=False,
                 branch_supported=True,
+                usage_snapshot={
+                    "provider": "codex",
+                    "provider_session_id": "provider-source",
+                    "scope": "session",
+                    "input_tokens": 100,
+                },
             ),
         ),
     )
@@ -371,15 +377,29 @@ def test_fork_rebases_run_paths_and_applies_session_policy(
     if legacy_slot:
         # Slotted dataclasses encode fields in order. Older pickles have no
         # state entry for the report_path field appended by the new runtime.
+        def legacy_session_state(session: SessionSnapshot) -> list[object]:
+            return [
+                getattr(session, field.name)
+                for field in fields(session)
+                if field.name != "usage_snapshot"
+            ]
+
         with monkeypatch.context() as legacy:
             legacy.setattr(
                 GraphFrameSnapshot, "__getstate__", legacy_frame_state
             )
+            legacy.setattr(
+                SessionSnapshot,
+                "__getstate__",
+                legacy_session_state,
+            )
             payload = encode_continuation(snapshot)
         unnormalized = cast(ContinuationSnapshot, cloudpickle.loads(payload))
         assert not hasattr(unnormalized.frames[0], "report_path")
+        assert not hasattr(unnormalized.sessions[0], "usage_snapshot")
         snapshot = decode_continuation(payload)
         assert cast(GraphFrameSnapshot, snapshot.frames[0]).report_path is None
+        assert snapshot.sessions[0].usage_snapshot is None
 
     branched = fork_continuation(
         snapshot,
@@ -396,6 +416,10 @@ def test_fork_rebases_run_paths_and_applies_session_policy(
     assert branched_frame.value == target / "value.txt"
     assert branched.sessions[0].provider_session_id == "provider-source"
     assert branched.sessions[0].copy_on_write
+    assert (
+        branched.sessions[0].usage_snapshot
+        == snapshot.sessions[0].usage_snapshot
+    )
 
     fresh = fork_continuation(
         snapshot,
@@ -408,6 +432,7 @@ def test_fork_rebases_run_paths_and_applies_session_policy(
     assert fresh.sessions[0].provider_session_id is None
     assert fresh.sessions[0].access is None
     assert not fresh.sessions[0].copy_on_write
+    assert fresh.sessions[0].usage_snapshot is None
 
 
 def test_fork_rejects_unbranchable_sessions_and_rebased_key_collisions(

@@ -1,0 +1,4 @@
+include DEVELOPMENT.md pyrightconfig.json uv.lock
+recursive-include tests *.py
+recursive-include typings *.pyi
+recursive-include verdog_runtime *.md

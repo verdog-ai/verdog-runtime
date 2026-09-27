@@ -32,6 +32,7 @@ from verdog_runtime import (
     _configuration,
     _process,
     _protocol,
+    _usage,
     declarations,
 )
 from verdog_runtime import _run_store as run_store
@@ -574,6 +575,7 @@ def _restart_session_payload(
                 "copy_on_write": session.copy_on_write,
                 "branch_supported": session.branch_supported,
                 "tainted": session.tainted,
+                "usage_snapshot": getattr(session, "usage_snapshot", None),
             }
             for session in (by_id[resource_id] for resource_id in referenced)
         ],
@@ -629,6 +631,7 @@ def _restart_session_resource(
         require_copy_on_write=require_copy_on_write,
         branch_supported=branch_supported,
         tainted=tainted,
+        usage_snapshot=_usage.validate_snapshot(item.get("usage_snapshot")),
     )
     return resource_id, resource
 
@@ -757,6 +760,44 @@ class _GraphOutput:
             statistics,
             report_relative,
             restored,
+        )
+
+    def bind_usage(
+        self,
+        graph: declarations.GraphDefinition[Any, Any, Any, Any],
+        run_id: ids.RunId,
+    ) -> _usage.Scope:
+        node_paths: dict[str, tuple[str, str, str, str]] = {}
+        for node in graph.nodes:
+            if isinstance(node, declarations.FeatureNodeDefinition):
+                kind = "feature"
+            elif isinstance(node.operation, declarations.Agent):
+                kind = "agent"
+            elif isinstance(node.operation, declarations.SubroutineCall):
+                kind = "subroutine_call"
+            elif isinstance(node.operation, declarations.WorkflowCall):
+                kind = "workflow_call"
+            else:
+                kind = "python"
+            path = (self.relative / _encoded_id(str(node.id))).as_posix()
+            node_paths[path] = (
+                self.project_path,
+                str(graph.id),
+                str(node.id),
+                kind,
+            )
+        self.statistics.bind(
+            run_id=str(run_id),
+            graph_path=self.relative,
+            project_path=self.project_path,
+            graph_id=str(graph.id),
+            node_paths=node_paths,
+        )
+        return _usage.Scope(
+            self.root,
+            str(run_id),
+            self.project_path,
+            self.report_relative.as_posix(),
         )
 
     def visit(self, node_id: ids.NodeId, /) -> pathlib.Path:
@@ -1044,6 +1085,7 @@ class Dispatcher:
                             ),
                             branch_supported=resource.branch_supported,
                             tainted=resource.tainted,
+                            usage_snapshot=resource.usage_snapshot,
                         )
                     )
                 bindings.append((str(session_id), resource_id))
@@ -1648,6 +1690,7 @@ class Dispatcher:
                 ),
                 branch_supported=session.branch_supported,
                 tainted=session.tainted,
+                usage_snapshot=getattr(session, "usage_snapshot", None),
             )
         return types.MappingProxyType(stored)
 
@@ -1675,11 +1718,8 @@ class Dispatcher:
                     f"checkpoint session resource is missing: {resource_id}"
                 )
             restored_sessions[ids.AgentSessionId(raw_session_id)] = resource
-        return _agents.Resources(
-            resources.profiles,
-            types.MappingProxyType(restored_sessions),
-            resources.invocation_journal,
-            resources.invocation_epoch,
+        return dataclasses.replace(
+            resources, sessions=types.MappingProxyType(restored_sessions)
         )
 
     def _restore_graph_frame(
@@ -1694,6 +1734,8 @@ class Dispatcher:
         output_root: pathlib.Path,
         statistics: statistics_module.RunStatistics,
         /,
+        *,
+        run_id: ids.RunId,
     ) -> _LiveGraphFrame:
         validation.validate_graph(graph)
         expected_scope = (
@@ -1736,6 +1778,8 @@ class Dispatcher:
             dict(stored_frame.visits),
             report_relative=report_relative,
         )
+        usage_scope = graph_output.bind_usage(graph, run_id)
+        resources = dataclasses.replace(resources, usage_scope=usage_scope)
         report_dir = _contained(output_root, report_relative)
         if not (report_dir / "config.md").exists():
             _configuration.write_configuration(
@@ -1957,6 +2001,8 @@ class Dispatcher:
         output_root: pathlib.Path,
         statistics: statistics_module.RunStatistics,
         /,
+        *,
+        run_id: ids.RunId,
     ) -> _LiveGraphFrame:
         target = self._resolve_local_call(
             operation, parent, node.id, params_registry
@@ -2002,6 +2048,7 @@ class Dispatcher:
             sessions,
             output_root,
             statistics,
+            run_id=run_id,
         )
 
     def _restore_nested_stack(
@@ -2054,6 +2101,7 @@ class Dispatcher:
             sessions,
             output_root,
             statistics,
+            run_id=snapshot.run_id,
         )
         live_frames: list[_LiveGraphFrame | _LiveCallFrame] = [root_frame]
         position = 1
@@ -2084,6 +2132,7 @@ class Dispatcher:
                 registry,
                 output_root,
                 statistics,
+                run_id=snapshot.run_id,
             )
             live_frames.append(child)
             parent = child
@@ -2647,11 +2696,8 @@ class Dispatcher:
                         "workflow definition"
                     )
                 seeded[session_id] = restored
-            resources = _agents.Resources(
-                resources.profiles,
-                types.MappingProxyType(seeded),
-                resources.invocation_journal,
-                resources.invocation_epoch,
+            resources = dataclasses.replace(
+                resources, sessions=types.MappingProxyType(seeded)
             )
         for session in resources.sessions.values():
             if not session.persistent or session.provider is not None:
@@ -2703,6 +2749,7 @@ class Dispatcher:
                 project_path,
                 statistics,
             )
+            usage_scope = graph_output.bind_usage(graph, run_id)
             validation.validate_graph(graph)
             registered_params = params_registry.value(project_path, graph.id)
             params = (
@@ -2714,6 +2761,7 @@ class Dispatcher:
             resources = self._activation_resources(
                 graph, value, params, resource_arguments
             )
+            resources = dataclasses.replace(resources, usage_scope=usage_scope)
             state = initial_workflow_state(graph)
             frame = _LiveGraphFrame(
                 project_root=project_root,
@@ -2754,6 +2802,7 @@ class Dispatcher:
                     pathlib.Path(parent_call.visit_path),
                     str(graph.id),
                     parent_report=parent.graph_output.report_relative,
+                    parent_visit_index=sum(parent.graph_output.visits.values()),
                 )
             self._enter(
                 graph.enter.id,
@@ -3131,6 +3180,7 @@ class Dispatcher:
             pathlib.Path(call.visit_path),
             None,
             parent_report=parent.graph_output.report_relative,
+            parent_visit_index=sum(parent.graph_output.visits.values()),
         )
 
     def _push_local_child(
@@ -4221,11 +4271,8 @@ class Dispatcher:
         resources: _agents.Resources,
     ) -> _NodeHandler:
         if isinstance(operation, declarations.Agent):
-            invocation_resources = _agents.Resources(
-                resources.profiles,
-                resources.sessions,
-                resources.invocation_journal,
-                budget.remaining,
+            invocation_resources = dataclasses.replace(
+                resources, invocation_epoch=budget.remaining
             )
             return _NodeHandler(
                 "agent",

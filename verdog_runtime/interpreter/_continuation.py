@@ -119,6 +119,7 @@ class SessionSnapshot:
     copy_on_write: bool = False
     branch_supported: bool | None = None
     tainted: bool = False
+    usage_snapshot: dict[str, object] | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -249,6 +250,12 @@ def decode_continuation(payload: bytes, /) -> ContinuationSnapshot:
             if isinstance(frame, GraphFrameSnapshot)
             else frame
             for frame in value.frames
+        ),
+        sessions=tuple(
+            dataclasses.replace(
+                session, usage_snapshot=getattr(session, "usage_snapshot", None)
+            )
+            for session in value.sessions
         ),
     )
 
@@ -413,6 +420,9 @@ def _validate_started_child(frame: CallFrameSnapshot, /) -> None:
 
 
 def _validate_session(session: SessionSnapshot, /) -> None:
+    from verdog_runtime import _usage
+
+    _usage.validate_snapshot(getattr(session, "usage_snapshot", None))
     if type(session.persistent) is not bool:
         raise ValueError("checkpoint session persistence is invalid")
     if (
@@ -675,6 +685,11 @@ def fork_continuation(
                 else session.branch_supported
             ),
             tainted=False,
+            usage_snapshot=(
+                None
+                if policy is policies.SessionPolicy.FRESH
+                else session.usage_snapshot
+            ),
         )
         for session in rebased.sessions
     )

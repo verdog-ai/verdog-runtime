@@ -139,6 +139,29 @@ def test_resume_refuses_a_changed_request_at_the_same_boundary(
     assert captured.value.code == "invocation.identity_mismatch"
 
 
+def test_invalid_usage_snapshot_keeps_journal_error_diagnostics(
+    tmp_path: Path,
+) -> None:
+    output, workspace = _journal_root(tmp_path)
+    request = _request(output, workspace)
+    journal = InvocationJournal(output)
+    address = journal.address(request, transition_epoch=9998, slot=1)
+    journal.prepare(address, request, "test")
+    journal.complete(address, request, "test", AgentReply(text="done"))
+    path = next((output / ".verdog/invocations").glob("*.json"))
+    record = json.loads(path.read_text("utf-8"))
+    record["usage_snapshot"] = {"scope": "session", "input_tokens": -1}
+    path.write_text(json.dumps(record), "utf-8")
+
+    with pytest.raises(InvocationJournalError) as captured:
+        journal.prepare(address, request, "test")
+    assert captured.value.code == "invocation.journal_invalid"
+    assert captured.value.details == {
+        "path": str(path),
+        "field": "usage_snapshot",
+    }
+
+
 def test_transition_epoch_separates_repeated_visits(tmp_path: Path) -> None:
     output, workspace = _journal_root(tmp_path)
     request = _request(output, workspace)

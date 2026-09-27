@@ -17,7 +17,7 @@ import pathlib
 import stat
 from typing import NoReturn, cast
 
-from verdog_runtime import _run_metadata
+from verdog_runtime import _run_metadata, _usage
 from verdog_runtime.declarations import agents as agent_declarations
 from verdog_runtime.declarations import ids
 
@@ -120,6 +120,7 @@ class InvocationRequestRecord:
 class JournaledReply:
     reply: agent_declarations.AgentReply
     replayed: bool
+    usage_snapshot: dict[str, object] | None = None
 
 
 def _object(path: pathlib.Path) -> dict[str, object]:
@@ -263,6 +264,12 @@ class InvocationJournal:
             )
         ):
             self._invalid(path, "reply")
+        try:
+            usage_snapshot = _usage.validate_snapshot(
+                record.get("usage_snapshot")
+            )
+        except ValueError:
+            self._invalid(path, "usage_snapshot")
         return JournaledReply(
             agent_declarations.AgentReply(
                 text=text,
@@ -273,6 +280,7 @@ class InvocationJournal:
                 ),
             ),
             replayed=True,
+            usage_snapshot=usage_snapshot,
         )
 
     def complete(
@@ -282,6 +290,8 @@ class InvocationJournal:
         provider: str,
         reply: agent_declarations.AgentReply,
         /,
+        *,
+        usage_snapshot: dict[str, object] | None = None,
     ) -> JournaledReply:
         requested = InvocationRequestRecord.from_request(request, provider)
         path = self._path(address)
@@ -303,6 +313,7 @@ class InvocationJournal:
                 "schema_version": _SCHEMA_VERSION,
                 "status": "completed",
                 "attempt": attempt,
+                "usage_snapshot": usage_snapshot,
                 "address": address.as_json(),
                 "request": requested.as_json(),
                 "reply": {
@@ -315,7 +326,13 @@ class InvocationJournal:
                 },
             },
         )
-        return JournaledReply(reply, replayed=False)
+        return JournaledReply(
+            reply, replayed=False, usage_snapshot=usage_snapshot
+        )
+
+    def is_retry(self, address: InvocationAddress) -> bool:
+        path = self._path(address)
+        return self._attempt(path, _object(path)) > 1
 
     def _path(self, address: InvocationAddress, /) -> pathlib.Path:
         encoded = json.dumps(

@@ -1,6 +1,7 @@
 """Human-readable values supplied to a runtime visit."""
 
 import dataclasses
+import html
 import itertools
 import json
 import os.path
@@ -59,9 +60,15 @@ def write_configuration(
 class _InvocationCall:
     label: str
     directory: pathlib.Path
+    parent_visit_index: int | None = None
 
 
 _INVOCATION_PARENT = ".verdog-invocation.json"
+_CALLS_MARKER = "\n## Calls\n\n"
+_NAVIGATION = re.compile(
+    r"\A<!-- verdog-navigation -->\n.*?\n<!-- /verdog-navigation -->\n\n",
+    re.DOTALL,
+)
 
 
 def _relative_output(
@@ -85,6 +92,7 @@ def register_invocation(
     /,
     *,
     parent_report: pathlib.Path,
+    parent_visit_index: int | None = None,
 ) -> None:
     """Persist a child graph's parentage independently of directory nesting."""
     child_directory = _relative_output(root, child_output)
@@ -93,13 +101,31 @@ def register_invocation(
     _relative_output(root, call_visit)
     if not call_visit.is_relative_to(parent_graph):
         raise ValueError("invocation call visit is outside its parent graph")
-    payload = {
+    if parent_visit_index is not None and (
+        type(parent_visit_index) is not int or parent_visit_index <= 0
+    ):
+        raise ValueError("invalid invocation parent visit index")
+    metadata = child_directory / _INVOCATION_PARENT
+    if metadata.exists() or metadata.is_symlink():
+        parent, _ = _read_registered_call(root, child_directory, graph_id)
+        existing = json.loads(metadata.read_text(encoding="utf-8"))
+        if (
+            parent != _relative_output(root, parent_report)
+            or existing["parent_graph"] != parent_graph.as_posix()
+            or existing["call_visit"] != call_visit.as_posix()
+        ):
+            raise ValueError("invocation report parent metadata changed")
+        # Metadata is a checkpointed artifact. Resume must not rewrite it.
+        return
+    payload: dict[str, object] = {
         "parent_graph": parent_graph.as_posix(),
         "call_visit": call_visit.as_posix(),
         "graph_id": graph_id,
         "parent_report": parent_report.as_posix(),
     }
-    (child_directory / _INVOCATION_PARENT).write_text(
+    if parent_visit_index is not None:
+        payload["parent_visit_index"] = parent_visit_index
+    metadata.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
@@ -117,12 +143,28 @@ def _registered_call(
         metadata = child_directory / _INVOCATION_PARENT
         if not metadata.is_file():
             return None
+    return _read_registered_call(root, child_directory, graph_id)
+
+
+def _read_registered_call(
+    root: pathlib.Path,
+    child_directory: pathlib.Path,
+    graph_id: str | None = None,
+    /,
+) -> tuple[pathlib.Path, _InvocationCall]:
+    metadata = child_directory / _INVOCATION_PARENT
+    if metadata.is_symlink():
+        raise ValueError("invocation report metadata must not be a symlink")
     raw_value: object = json.loads(metadata.read_text(encoding="utf-8"))
     if not isinstance(raw_value, dict):
         raise ValueError("invalid invocation report parent metadata")
     raw = cast(dict[object, object], raw_value)
     expected = {"parent_graph", "call_visit", "graph_id"}
-    if set(raw) not in (expected, expected | {"parent_report"}):
+    if (
+        not expected
+        <= set(raw)
+        <= expected | {"parent_report", "parent_visit_index"}
+    ):
         raise ValueError("invalid invocation report parent metadata")
     parent_value = raw["parent_graph"]
     call_value = raw["call_visit"]
@@ -135,16 +177,23 @@ def _registered_call(
         not isinstance(registered_graph_id, str) or not registered_graph_id
     ):
         raise ValueError("invalid invocation report parent metadata")
-    if registered_graph_id is not None and registered_graph_id != graph_id:
+    if (
+        registered_graph_id is not None
+        and graph_id is not None
+        and registered_graph_id != graph_id
+    ):
         raise ValueError(
             "invocation report graph id does not match its metadata"
         )
     parent_graph = pathlib.Path(parent_value)
+    _relative_output(root, parent_graph)
     call_visit = pathlib.Path(call_value)
     report_value = raw.get("parent_report", parent_graph.parent.as_posix())
     if not isinstance(report_value, str) or not report_value:
         raise ValueError("invalid invocation report parent metadata")
     parent = _relative_output(root, pathlib.Path(report_value))
+    if parent == child_directory:
+        raise ValueError("invocation report cannot be its own parent")
     _relative_output(root, call_visit)
     try:
         call_path = call_visit.relative_to(parent_graph).as_posix()
@@ -152,17 +201,58 @@ def _registered_call(
         raise ValueError(
             "invocation report call visit is outside its parent graph"
         ) from error
-    return parent, _InvocationCall(f"{call_path} — {graph_id}", child_directory)
+    index = raw.get("parent_visit_index")
+    if index is not None and (type(index) is not int or index <= 0):
+        raise ValueError("invalid invocation parent visit index")
+    selected_id = graph_id or registered_graph_id
+    label = call_path if selected_id is None else f"{call_path} — {selected_id}"
+    return parent, _InvocationCall(label, child_directory, index)
 
 
 def _call_link(
     call: _InvocationCall, parent: pathlib.Path, filename: str
 ) -> str:
-    label = re.sub(r"([\\`*_\[\]])", r"\\\1", _markdown.format_cell(call.label))
-    target = pathlib.Path(
-        os.path.relpath(call.directory / filename, start=parent)
-    ).as_posix()
-    return f"- [{label}]({urllib.parse.quote(target, safe='/')})\n"
+    return f"- {_report_link(call.label, call.directory / filename, parent)}\n"
+
+
+def _report_link(label: str, report: pathlib.Path, parent: pathlib.Path) -> str:
+    label = re.sub(r"([\\`*_\[\]])", r"\\\1", _markdown.format_cell(label))
+    target = pathlib.Path(os.path.relpath(report, start=parent)).as_posix()
+    return f"[{label}]({urllib.parse.quote(target, safe='/')})"
+
+
+def _stored_calls(
+    root: pathlib.Path, report: pathlib.Path
+) -> list[_InvocationCall]:
+    if report.is_symlink():
+        raise ValueError("invocation report must not be a symlink")
+    if not report.is_file():
+        return []
+    text = report.read_text(encoding="utf-8", errors="replace")
+    if _CALLS_MARKER not in text:
+        return []
+    section = text.split(_CALLS_MARKER, 1)[1].split("\n## ", 1)[0]
+    calls: list[_InvocationCall] = []
+    for match in re.finditer(r"^- \[(.*)\]\((.*)\)$", section, re.MULTILINE):
+        label, target = match.group(1, 2)
+        url = urllib.parse.urlsplit(target)
+        if url.scheme or url.netloc or url.query or url.fragment:
+            raise ValueError("invocation report link must be a relative file")
+        relative = pathlib.Path(urllib.parse.unquote(url.path))
+        if relative.is_absolute() or relative.name not in (
+            "config.md",
+            "stats.md",
+        ):
+            raise ValueError("invalid invocation report link")
+        directory = _relative_output(
+            root, report.parent.relative_to(root) / relative.parent
+        )
+        if directory == report.parent:
+            raise ValueError("invocation report cannot be its own parent")
+        label = html.unescape(label.replace("<br>", "\n"))
+        label = re.sub(r"\\([\\`*_\[\]])", r"\1", label)
+        calls.append(_InvocationCall(label, directory))
+    return calls
 
 
 def _append(report: pathlib.Path, text: str) -> None:
@@ -184,9 +274,82 @@ class InvocationReports:
     """Link observed invocations from the root process's timing stream."""
 
     def __init__(self, root: pathlib.Path) -> None:
-        self.root = root
+        self.root = root.resolve()
         self._directories: dict[pathlib.Path, pathlib.Path] = {}
         self._calls: dict[pathlib.Path, list[_InvocationCall]] = {}
+        self._parents: dict[pathlib.Path, pathlib.Path] = {}
+        self._restore()
+
+    def _remember(self, parent: pathlib.Path, call: _InvocationCall) -> None:
+        if call.directory == self.root:
+            raise ValueError("invocation report root cannot have a parent")
+        previous_parent = self._parents.get(call.directory)
+        if previous_parent is not None and previous_parent != parent:
+            raise ValueError("invocation report has conflicting parents")
+        ancestor: pathlib.Path | None = parent
+        ancestors = {call.directory}
+        while ancestor is not None:
+            if ancestor in ancestors:
+                raise ValueError("invocation report parentage contains a cycle")
+            ancestors.add(ancestor)
+            ancestor = self._parents.get(ancestor)
+        self._parents[call.directory] = parent
+        calls = self._calls.setdefault(parent, [])
+        for position, existing in enumerate(calls):
+            if existing.directory == call.directory:
+                calls[position] = call
+                return
+        calls.append(call)
+
+    def _restore(self) -> None:
+        registered: dict[
+            pathlib.Path, tuple[pathlib.Path, _InvocationCall]
+        ] = {}
+        for directory, children, filenames in self.root.walk():
+            children[:] = sorted(name for name in children if name != ".verdog")
+            if _INVOCATION_PARENT in filenames:
+                parent, call = _read_registered_call(self.root, directory)
+                registered[directory] = parent, call
+        pending = [self.root, *registered]
+        seen: set[pathlib.Path] = set()
+        while pending:
+            directory = pending.pop()
+            if directory in seen:
+                continue
+            seen.add(directory)
+            for filename in ("config.md", "stats.md"):
+                for stored in _stored_calls(self.root, directory / filename):
+                    registration = registered.get(stored.directory)
+                    if registration is not None:
+                        parent, call = registration
+                        if parent != directory:
+                            raise ValueError(
+                                "invocation report has conflicting parents"
+                            )
+                        stored = dataclasses.replace(call, label=stored.label)
+                    self._remember(directory, stored)
+                    pending.append(stored.directory)
+        for parent, call in registered.values():
+            if call.directory not in self._parents:
+                self._remember(parent, call)
+
+    def _ordered_calls(self, parent: pathlib.Path) -> list[_InvocationCall]:
+        calls = self._calls.get(parent, [])
+        # Legacy Calls lists retain observed order; unlisted metadata was
+        # loaded in path order. New registrations carry execution order.
+        positions = {
+            call.directory: position for position, call in enumerate(calls)
+        }
+        return sorted(
+            calls,
+            key=lambda call: (
+                call.parent_visit_index is not None,
+                positions[call.directory]
+                if call.parent_visit_index is None
+                else call.parent_visit_index,
+                call.directory.as_posix(),
+            ),
+        )
 
     def __call__(self, record: _statistics.TimingRecord) -> None:
         graph = pathlib.Path(record.path).parent.parent
@@ -222,26 +385,88 @@ class InvocationReports:
             parent, call = registered
         if not (parent / "config.md").is_file():
             return
-        calls = self._calls.setdefault(parent, [])
-        calls.append(call)
+        self._remember(parent, call)
         report = parent / "config.md"
-        heading = _calls_heading(report) if len(calls) == 1 else ""
         link = _call_link(call, parent, "config.md")
-        if link not in report.read_text(encoding="utf-8", errors="replace"):
-            _append(report, heading + link)
+        if call.directory not in {
+            stored.directory for stored in _stored_calls(self.root, report)
+        }:
+            _append(report, _calls_heading(report) + link)
 
     def finish(self) -> None:
-        for directory, calls in self._calls.items():
+        self._restore()
+        directories = {self.root, *self._parents, *self._calls}
+        available = {
+            directory
+            for directory in directories
+            if (directory / "stats.md").is_file()
+        }
+        siblings = {
+            parent: [
+                call
+                for call in self._ordered_calls(parent)
+                if call.directory in available
+            ]
+            for parent in self._calls
+        }
+        for directory in sorted(available):
             report = directory / "stats.md"
-            if not report.is_file():
-                continue
             existing = report.read_text(encoding="utf-8", errors="replace")
-            links: list[str] = []
-            for call in calls:
-                if not (call.directory / "stats.md").is_file():
-                    continue
-                link = _call_link(call, directory, "stats.md")
-                if link not in existing:
-                    links.append(link)
-            if links:
-                _append(report, _calls_heading(report) + "".join(links))
+            text = _NAVIGATION.sub("", existing, count=1)
+            if _CALLS_MARKER in text:
+                before, after = text.split(_CALLS_MARKER, 1)
+                following = after.partition("\n## ")
+                text = before + (
+                    following[1] + following[2] if following[1] else "\n"
+                )
+            calls = siblings.get(directory, [])
+            if calls:
+                text = (
+                    text.rstrip()
+                    + "\n"
+                    + _CALLS_MARKER
+                    + "".join(
+                        _call_link(call, directory, "stats.md")
+                        for call in calls
+                    )
+                )
+            navigation: list[str] = []
+            parent = self._parents.get(directory)
+            if parent is not None:
+                calls = siblings[parent]
+                position = next(
+                    i
+                    for i, call in enumerate(calls)
+                    if call.directory == directory
+                )
+                if position:
+                    navigation.append(
+                        _report_link(
+                            "← Previous call",
+                            calls[position - 1].directory / "stats.md",
+                            directory,
+                        )
+                    )
+                if parent in available:
+                    navigation.append(
+                        _report_link("↑ Parent", parent / "stats.md", directory)
+                    )
+                if position + 1 < len(calls):
+                    navigation.append(
+                        _report_link(
+                            "Next call →",
+                            calls[position + 1].directory / "stats.md",
+                            directory,
+                        )
+                    )
+            if navigation:
+                text = (
+                    "<!-- verdog-navigation -->\n"
+                    + " · ".join(navigation)
+                    + "\n<!-- /verdog-navigation -->\n\n"
+                    + text
+                )
+            if text != existing:
+                report.write_text(
+                    text, encoding="utf-8", errors="backslashreplace"
+                )

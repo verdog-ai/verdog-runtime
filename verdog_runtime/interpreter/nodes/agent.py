@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 from typing import TypeVar, cast
 
-from verdog_runtime import agents, declarations
+from verdog_runtime import _usage, agents, declarations
 from verdog_runtime import cancellation as cancellation_module
 from verdog_runtime.interpreter import _agents, nodes
 
@@ -57,24 +57,71 @@ def _invoke_with_recovery(
     provider: str,
     resources: _agents.Resources,
     slot: int,
+    session: _agents.SessionResource,
     /,
 ) -> agents.AgentReply:
     journal = resources.invocation_journal
-    if journal is None:
-        return _agent_reply(profile(request))
-    epoch = resources.invocation_epoch
-    if epoch is None:
-        raise RuntimeError("agent invocation journal has no boundary epoch")
-    address = journal.address(
-        request,
-        transition_epoch=epoch,
-        slot=slot,
-    )
-    recorded = journal.prepare(address, request, provider)
-    if recorded is None:
+    address = None
+    if resources.usage_scope is not None:
+        # A blocked recovery creates artifacts but never reaches a provider.
+        _usage.replay(request.artifact_dir)
+    baseline = session.usage_snapshot
+    if journal is not None:
+        epoch = resources.invocation_epoch
+        if epoch is None:
+            raise RuntimeError("agent invocation journal has no boundary epoch")
+        address = journal.address(request, transition_epoch=epoch, slot=slot)
+        recorded = journal.prepare(address, request, provider)
+        if recorded is not None:
+            session.usage_snapshot = recorded.usage_snapshot
+            return _agent_reply(recorded.reply)
+        if (
+            journal.is_retry(address)
+            and request.provider_session_action
+            is not agents.AgentSessionAction.FORK
+        ):
+            # The incomplete attempt may have advanced this same session.
+            baseline = None
+    _usage.begin(request, resources.usage_scope, baseline)
+    try:
         reply = _agent_reply(profile(request))
-        recorded = journal.complete(address, request, provider, reply)
-    return _agent_reply(recorded.reply)
+    except BaseException as error:
+        try:
+            ending = _usage.finish(
+                request.artifact_dir,
+                "cancelled"
+                if isinstance(
+                    error,
+                    (cancellation_module.ExecutionCancelled, KeyboardInterrupt),
+                )
+                else "failed",
+                request.provider_session_id
+                if request.provider_session_action
+                is agents.AgentSessionAction.CONTINUE
+                else None,
+            )
+        except Exception:
+            ending = None
+        if (
+            request.provider_session_action
+            is not agents.AgentSessionAction.FORK
+        ):
+            session.usage_snapshot = ending
+        raise
+    try:
+        ending = _usage.finish(
+            request.artifact_dir,
+            "succeeded",
+            reply.provider_session_id or request.provider_session_id,
+        )
+    except Exception:
+        ending = None
+    session.usage_snapshot = ending
+    if journal is not None and address is not None:
+        journal.complete(
+            address, request, provider, reply, usage_snapshot=ending
+        )
+    return reply
 
 
 def _agent_context(
@@ -136,6 +183,7 @@ def _agent_context(
             provider,
             resources,
             invocation_count,
+            session,
         )
         session.advance(
             provider,

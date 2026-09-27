@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import os
+import pathlib
 import subprocess
 import time
 from collections.abc import Callable, Collection, Sequence
 from typing import cast
 
 from verdog_runtime import _process
+from verdog_runtime import _usage as usage_ledger
 from verdog_runtime.agents import _artifacts
+from verdog_runtime.agents import _usage as provider_usage
 from verdog_runtime.declarations import agents as agent_declarations
 from verdog_runtime.declarations import ids
 
@@ -139,6 +143,7 @@ def invoke_provider(
     _artifacts.begin(request, provider, model)
     started = time.monotonic()
     returncode: int | None = None
+    result: CommandResult | None = None
     try:
         result = run_command(command, request)
         returncode = result.returncode
@@ -197,6 +202,9 @@ def invoke_provider(
             provider_session_id=request.provider_session_id,
         )
         raise
+    finally:
+        _capture_usage(request, provider, executable, model, result, command)
+    assert result is not None
     _artifacts.complete(
         request,
         provider,
@@ -209,3 +217,81 @@ def invoke_provider(
     return agent_declarations.AgentReply(
         text=response, provider_session_id=provider_session_id
     )
+
+
+@functools.lru_cache(maxsize=32)
+def _provider_version(executable: str, workspace: pathlib.Path) -> str | None:
+    environment = os.environ.copy()
+    options, owns_group = _process.process_options(environment)
+    try:
+        with subprocess.Popen(
+            [executable, "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            cwd=workspace,
+            **options,
+        ) as process:
+            try:
+                output, _ = process.communicate(timeout=2)
+            except BaseException:
+                _process.cleanup_after_interruption(
+                    process, owns_group=owns_group
+                )
+                raise
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return None
+    return (
+        output.decode("utf-8", errors="replace").strip()
+        if process.returncode == 0
+        else None
+    )
+
+
+def _capture_usage(
+    request: agent_declarations.AgentRequest,
+    provider: str,
+    executable: str,
+    model: str | None,
+    result: CommandResult | None,
+    command: Sequence[str] = (),
+) -> None:
+    # The runner creates the ledger; direct adapter use keeps its old contract.
+    # Accounting must never replace a provider failure or cancellation.
+    try:
+        if not (request.artifact_dir / "usage.json").is_file():
+            return
+        events = (
+            result.events
+            if result is not None
+            else (request.artifact_dir / "events.jsonl").read_text(
+                "utf-8", errors="replace"
+            )
+        )
+        value = provider_usage.snapshot(
+            events, provider, model, command=command
+        )
+        if (
+            value is not None
+            and provider == "claude"
+            and value.get("scope") == "unknown"
+            and result is not None
+            and not request.cancellation.cancelled
+            and any(
+                value.get(field) is not None
+                for field in (*usage_ledger.TOKEN_FIELDS, "cost_usd")
+            )
+        ):
+            value = provider_usage.snapshot(
+                events,
+                provider,
+                model,
+                provider_version=_provider_version(
+                    executable, request.workspace
+                ),
+                command=command,
+            )
+        usage_ledger.capture(request.artifact_dir, value)
+    except Exception:
+        pass

@@ -324,7 +324,7 @@ def test_checkpoint_directory_is_authoritative_without_rewriting_run_manifest(
         (store.checkpoint_directory(1) / "manifest.json").read_text("utf-8")
     )
     assert run_path.read_bytes() == before
-    assert checkpoint_document["schema_version"] == 3
+    assert checkpoint_document["schema_version"] == 4
     assert checkpoint_document["sessions"] == sessions.as_json()
     assert committed.sessions == sessions
 
@@ -666,7 +666,10 @@ def test_artifact_references_only_write_metadata_and_reuse_verified_hashes(
         artifact_references, "_materialize_artifact_bytes", forbid_copy
     )
     monkeypatch.setattr(os, "link", forbid_copy)
-    for sequence in (1, 2):
+    later = visit / "later.txt"
+    for sequence in (1, 2, 3):
+        if sequence == 3:
+            later.write_text("new result\n", encoding="utf-8")
         store.commit_checkpoint(_checkpoint(sequence), capture_artifacts=True)
         assert store.artifact_references_available(sequence)
         checkpoint = store.checkpoint_directory(sequence)
@@ -675,15 +678,164 @@ def test_artifact_references_only_write_metadata_and_reuse_verified_hashes(
             "shards",
         }
         document = json.loads((checkpoint / "manifest.json").read_text("utf-8"))
-        assert document["artifacts"]["kind"] == "references"
-        assert [item["path"] for item in document["artifacts"]["files"]] == [
-            "graph-main/propose/000001/result.txt"
-        ]
-        assert "graph-main/propose/000001/empty" in {
-            item["path"] for item in document["artifacts"]["directories"]
-        }
-    assert reads == [payload.relative_to(store.output_dir)]
+        artifacts = document["artifacts"]
+        if sequence == 1:
+            assert artifacts["schema_version"] == 1
+            assert artifacts["kind"] == "references"
+            assert [item["path"] for item in artifacts["files"]] == [
+                "graph-main/propose/000001/result.txt"
+            ]
+            assert "graph-main/propose/000001/empty" in {
+                item["path"] for item in artifacts["directories"]
+            }
+        else:
+            assert artifacts["schema_version"] == 2
+            assert artifacts["kind"] == "delta"
+            assert artifacts["base_sequence"] == sequence - 1
+            assert artifacts["directories"] == []
+            assert [item["path"] for item in artifacts["files"]] == (
+                []
+                if sequence == 2
+                else [later.relative_to(store.output_dir).as_posix()]
+            )
+    assert reads == [
+        path.relative_to(store.output_dir) for path in (payload, later)
+    ]
     assert payload.stat().st_ino == inode
+    for reader in (store, RunStore.open(store.output_dir)):
+        checkpoints = reader._all_checkpoints()  # pyright: ignore[reportPrivateUsage]
+        for previous, current in zip(
+            checkpoints[:-1], checkpoints[1:], strict=True
+        ):
+            assert current.artifacts is not None
+            assert current.artifacts.previous is previous.artifacts
+        assert (
+            sum(
+                len(checkpoint.artifacts.files)
+                for checkpoint in checkpoints
+                if checkpoint.artifacts is not None
+            )
+            == 2
+        )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_artifact_deltas_restore_boundaries_across_uncaptured_checkpoints(
+    tmp_path: Path, legacy: bool
+) -> None:
+    store = _store(tmp_path)
+    data = store.output_dir / "data"
+    data.mkdir()
+    (data / "before.txt").write_text("before", encoding="utf-8")
+    store.commit_checkpoint(_checkpoint(1), capture_artifacts=True)
+    if legacy:
+        path = store.checkpoint_directory(1) / "manifest.json"
+        document = json.loads(path.read_text("utf-8"))
+        document["schema_version"] = 3
+        path.write_text(json.dumps(document), encoding="utf-8")
+        store = RunStore.open(store.output_dir)
+    store.commit_checkpoint(_checkpoint(2))
+    assert not store.artifact_references_available(2)
+    (data / "empty").mkdir(mode=0o750)
+    (data / "later.txt").write_text("later", encoding="utf-8")
+    store.commit_checkpoint(_checkpoint(3), capture_artifacts=True)
+    document = json.loads(
+        (store.checkpoint_directory(3) / "manifest.json").read_text("utf-8")
+    )
+    delta = document["artifacts"]
+    assert delta["base_sequence"] == 1
+    assert [record["path"] for record in delta["directories"]] == ["data/empty"]
+    assert [record["path"] for record in delta["files"]] == ["data/later.txt"]
+    store.commit_checkpoint(_checkpoint(4), capture_artifacts=True)
+    document = json.loads(
+        (store.checkpoint_directory(4) / "manifest.json").read_text("utf-8")
+    )
+    assert document["artifacts"] == {
+        "schema_version": 2,
+        "kind": "delta",
+        "base_sequence": 3,
+        "directories": [],
+        "files": [],
+    }
+    reader = RunStore.open(store.output_dir)
+    reader.validate_artifacts(4)
+    first = reader.materialize_artifacts(1, tmp_path / "first")
+    latest = reader.materialize_artifacts(4, tmp_path / "latest")
+    assert (first / "data/before.txt").read_text("utf-8") == "before"
+    assert not (first / "data/later.txt").exists()
+    assert not (first / "data/empty").exists()
+    assert (latest / "data/before.txt").read_text("utf-8") == "before"
+    assert (latest / "data/later.txt").read_text("utf-8") == "later"
+    assert (latest / "data/empty").stat().st_mode & 0o777 == 0o750
+    shutil.rmtree(store.checkpoint_directory(2))
+    with pytest.raises(RunStoreError) as gap:
+        load_checkpoint_summary(store.checkpoint_directory(3) / "manifest.json")
+    assert gap.value.code == "checkpoint.sequence_gap"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "self",
+        "future",
+        "boolean",
+        "missing-base",
+        "missing-artifacts",
+        "older-base",
+        "readded-file",
+        "readded-directory",
+        "legacy-delta",
+        "base-hash",
+    ],
+)
+def test_artifact_delta_chains_reject_corruption_even_for_cached_readers(
+    tmp_path: Path, damage: str
+) -> None:
+    store = _store(tmp_path)
+    data = store.output_dir / "data"
+    data.mkdir()
+    (data / "first.txt").write_text("first", encoding="utf-8")
+    store.commit_checkpoint(_checkpoint(1), capture_artifacts=True)
+    (data / "second.txt").write_text("second", encoding="utf-8")
+    store.commit_checkpoint(_checkpoint(2), capture_artifacts=True)
+    store.commit_checkpoint(_checkpoint(3), capture_artifacts=True)
+    reader = RunStore.open(store.output_dir)
+    reader.validate_artifacts(3)
+    path = store.checkpoint_directory(3) / "manifest.json"
+    document = json.loads(path.read_text("utf-8"))
+    if damage in {"self", "future", "boolean", "older-base"}:
+        document["artifacts"]["base_sequence"] = {
+            "self": 3,
+            "future": 4,
+            "boolean": True,
+            "older-base": 1,
+        }[damage]
+    elif damage == "missing-base":
+        del document["artifacts"]["base_sequence"]
+    elif damage == "missing-artifacts":
+        path = store.checkpoint_directory(2) / "manifest.json"
+        document = json.loads(path.read_text("utf-8"))
+        document["artifacts"] = None
+    elif damage in {"readded-file", "readded-directory"}:
+        first = json.loads(
+            (store.checkpoint_directory(1) / "manifest.json").read_text("utf-8")
+        )
+        field = "files" if damage == "readded-file" else "directories"
+        document["artifacts"][field] = first["artifacts"][field]
+    elif damage == "legacy-delta":
+        document["schema_version"] = 3
+    else:
+        path = store.checkpoint_directory(1) / "manifest.json"
+        document = json.loads(path.read_text("utf-8"))
+        document["artifacts"]["files"][0]["sha256"] = "0" * 64
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(RunStoreError):
+        reader.validate_artifacts(3)
+    with pytest.raises(RunStoreError):
+        RunStore.open(store.output_dir).materialize_artifacts(
+            3, tmp_path / "fork"
+        )
+    assert not (tmp_path / "fork").exists()
 
 
 def test_runtime_scratch_and_reports_are_excluded_by_ownership(
@@ -734,6 +886,7 @@ def test_failed_capture_preserves_immutable_files_and_previous_checkpoint(
     payload = store.output_dir / "result.txt"
     payload.write_text("stable", encoding="utf-8")
     store.commit_checkpoint(_checkpoint(1), capture_artifacts=True)
+    store.commit_checkpoint(_checkpoint(2), capture_artifacts=True)
     if damage == "modify":
         payload.write_text("modified", encoding="utf-8")
     elif damage == "remove":
@@ -744,18 +897,19 @@ def test_failed_capture_preserves_immutable_files_and_previous_checkpoint(
         payload.unlink()
         payload.symlink_to(tmp_path / "missing")
     with pytest.raises(RunStoreError) as failure:
-        store.commit_checkpoint(_checkpoint(2), capture_artifacts=True)
+        store.commit_checkpoint(_checkpoint(3), capture_artifacts=True)
     assert failure.value.code in {
         "checkpoint.artifact_corrupt",
         "checkpoint.artifact_unsafe",
     }
     assert store.checkpoint_directory(1).is_dir()
-    assert not store.checkpoint_directory(2).exists()
+    assert store.checkpoint_directory(2).is_dir()
+    assert not store.checkpoint_directory(3).exists()
     assert not tuple((store.control_dir / "staging").iterdir())
     with pytest.raises(RunStoreError):
-        RunStore.open(store.output_dir).validate_artifacts(1)
+        RunStore.open(store.output_dir).validate_artifacts(2)
     with pytest.raises(RunStoreError):
-        store.materialize_artifacts(1, tmp_path / "fork")
+        store.materialize_artifacts(2, tmp_path / "fork")
     assert not (tmp_path / "fork").exists()
 
 
@@ -764,21 +918,37 @@ def test_remote_inventory_is_persisted_without_late_rescan(
 ) -> None:
     store = _store(tmp_path)
     (store.output_dir / "before.txt").write_text("before", encoding="utf-8")
+    store.commit_checkpoint(_checkpoint(1), capture_artifacts=True)
+    (store.output_dir / "at-boundary.txt").write_text(
+        "captured", encoding="utf-8"
+    )
     captured = store.capture_artifacts()
+    assert captured["kind"] == "references"
     (store.output_dir / "later.txt").write_text("later", encoding="utf-8")
 
     def forbid_scan(*args: Any, **kwargs: Any) -> None:
         pytest.fail("parent must preserve the child's checkpoint boundary")
 
     monkeypatch.setattr(artifact_references, "_scan_artifacts", forbid_scan)
-    store.commit_checkpoint(_checkpoint(1), artifact_references=captured)
-    restored = store.materialize_artifacts(1, tmp_path / "fork")
+    store.commit_checkpoint(_checkpoint(2), artifact_references=captured)
+    document = json.loads(
+        (store.checkpoint_directory(2) / "manifest.json").read_text("utf-8")
+    )
+    assert document["artifacts"]["kind"] == "delta"
+    assert document["artifacts"]["base_sequence"] == 1
+    assert [record["path"] for record in document["artifacts"]["files"]] == [
+        "at-boundary.txt"
+    ]
+    restored = RunStore.open(store.output_dir).materialize_artifacts(
+        2, tmp_path / "fork"
+    )
     assert (restored / "before.txt").read_text("utf-8") == "before"
+    assert (restored / "at-boundary.txt").read_text("utf-8") == "captured"
     assert not (restored / "later.txt").exists()
     changed = json.loads(json.dumps(captured))
     changed["files"][0]["sha256"] = "0" * 64
     with pytest.raises(RunStoreError, match="integrity check"):
-        store.commit_checkpoint(_checkpoint(2), artifact_references=changed)
+        store.commit_checkpoint(_checkpoint(3), artifact_references=changed)
 
 
 def test_artifact_copy_is_independent_and_preserves_boundary_and_modes(
@@ -806,6 +976,15 @@ def test_artifact_copy_is_independent_and_preserves_boundary_and_modes(
     assert (restored_script.parent / "empty").stat().st_mode & 0o777 == 0o750
     assert not (restored_script.parent / "later.txt").exists()
     assert not (restored / ".verdog").exists()
+    latest = RunStore.open(store.output_dir).materialize_artifacts(
+        2, tmp_path / "latest-fork"
+    )
+    assert (
+        latest / script.relative_to(store.output_dir)
+    ).read_bytes() == script.read_bytes()
+    assert (
+        latest / tools.relative_to(store.output_dir) / "later.txt"
+    ).read_text("utf-8") == "not at boundary"
     restored_script.write_text("fork mutation\n", encoding="utf-8")
     assert script.read_text("utf-8") == "#!/bin/sh\nexit 0\n"
     shutil.rmtree(store.output_dir)

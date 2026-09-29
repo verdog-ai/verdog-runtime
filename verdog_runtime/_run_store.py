@@ -20,8 +20,8 @@ from collections.abc import Generator, Mapping, Sequence
 
 from verdog_runtime._artifact_references import (
     ArtifactCache,
-    ArtifactReferences,
     decode_artifact_references,
+    encode_artifact_references,
     materialize_artifact_references,
     validate_artifact_extension,
 )
@@ -335,6 +335,8 @@ class RunStore:
         return self.control_dir / CHECKPOINT_DIRECTORY / f"{sequence:06d}"
 
     def _loaded_checkpoint(self, sequence: int) -> LoadedCheckpoint:
+        if not self._checkpoint_cache_is_current():
+            self._all_checkpoints()
         path = self.checkpoint_directory(sequence) / "manifest.json"
         cached = self._checkpoint_cache.get(sequence)
         if cached is not None:
@@ -417,6 +419,7 @@ class RunStore:
                 code="checkpoint.sequence_invalid",
                 details={"sequence": summary.sequence, "expected": expected},
             )
+        previous = self._latest_artifact_checkpoint()
         checkpoint_root = directory.parent
         checkpoint_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         staging_root = self.control_dir / "staging"
@@ -443,7 +446,14 @@ class RunStore:
                 )
                 assert references is not None
                 validate_artifact_extension(
-                    self._latest_artifacts(), references
+                    None if previous is None else previous.artifacts, references
+                )
+                artifact_references = encode_artifact_references(
+                    references,
+                    previous=None if previous is None else previous.artifacts,
+                    base_sequence=None
+                    if previous is None
+                    else previous.summary.sequence,
                 )
             _write_checkpoint_stage(
                 staged,
@@ -458,7 +468,11 @@ class RunStore:
         finally:
             if not committed:
                 _remove_private_tree(staged)
-        loaded = load_checkpoint(directory / "manifest.json")
+        loaded = load_checkpoint(
+            directory / "manifest.json",
+            previous=previous,
+            resolve_previous=False,
+        )
         self._checkpoint_cache[summary.sequence] = loaded
         self._checkpoint_root_signature = checkpoint_directory_signature(
             self.output_dir
@@ -565,10 +579,10 @@ class RunStore:
             }
         )
 
-    def _latest_artifacts(self) -> ArtifactReferences | None:
+    def _latest_artifact_checkpoint(self) -> LoadedCheckpoint | None:
         return next(
             (
-                checkpoint.artifacts
+                checkpoint
                 for checkpoint in reversed(self._all_checkpoints())
                 if checkpoint.artifacts is not None
             ),
@@ -577,10 +591,11 @@ class RunStore:
 
     def capture_artifacts(self) -> dict[str, object]:
         """Capture references at the executing process's checkpoint boundary."""
+        previous = self._latest_artifact_checkpoint()
         return _capture_artifacts(
             self.output_dir,
             cache=self._artifact_cache,
-            previous=self._latest_artifacts(),
+            previous=None if previous is None else previous.artifacts,
         )
 
     def validate_artifacts(self, sequence: int) -> None:
@@ -667,7 +682,7 @@ class RunStore:
         removed_empty_target = False
         try:
             materialize_artifact_references(
-                self.output_dir, staged, *references
+                self.output_dir, staged, *references.all_records()
             )
             if existed:
                 target.rmdir()

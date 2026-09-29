@@ -730,12 +730,36 @@ def _checkpoint_sessions(
 
 
 def _checkpoint_artifacts(
-    value: Mapping[str, Any], path: pathlib.Path, /
+    value: Mapping[str, Any],
+    path: pathlib.Path,
+    previous: LoadedCheckpoint | None,
+    /,
 ) -> ArtifactReferences | None:
     # Defer this import because the artifact module shares our fsync primitive.
     from verdog_runtime._artifact_references import decode_artifact_references
 
-    return decode_artifact_references(value.get("artifacts"), path)
+    raw: object = value.get("artifacts")
+    if (
+        value["schema_version"] == 3
+        and isinstance(raw, dict)
+        and (
+            cast(dict[str, object], raw).get("schema_version") != 1
+            or cast(dict[str, object], raw).get("kind") != "references"
+        )
+    ):
+        raise _run_model.RunStoreError(
+            f"legacy checkpoint has invalid artifact references: {path}",
+            code="checkpoint.artifact_manifest_invalid",
+            details={"path": str(path)},
+        )
+    return decode_artifact_references(
+        cast(object, raw),
+        path,
+        previous=None if previous is None else previous.artifacts,
+        previous_sequence=None
+        if previous is None
+        else previous.summary.sequence,
+    )
 
 
 def validate_checkpoint_sessions(
@@ -756,20 +780,75 @@ def validate_checkpoint_sessions(
         )
 
 
-def load_checkpoint(path: pathlib.Path, /) -> LoadedCheckpoint:
+def load_checkpoint(
+    path: pathlib.Path,
+    /,
+    *,
+    previous: LoadedCheckpoint | None = None,
+    resolve_previous: bool = True,
+) -> LoadedCheckpoint:
     value, signature = _read_manifest(
         path, code="checkpoint.manifest_unreadable"
     )
     _version(
-        value, path, supported=(_run_model.CHECKPOINT_MANIFEST_SCHEMA_VERSION,)
+        value,
+        path,
+        supported=(3, _run_model.CHECKPOINT_MANIFEST_SCHEMA_VERSION),
     )
     summary = _checkpoint_summary(value, path)
+    raw_artifacts: object = value.get("artifacts")
+    if (
+        previous is None
+        and resolve_previous
+        and isinstance(raw_artifacts, dict)
+        and cast(dict[str, object], raw_artifacts).get("kind") == "delta"
+    ):
+        # Resolve a standalone historical read once, in sequence order. Index
+        # readers and writers already have this shared predecessor in memory.
+        if (
+            len(path.parents) < 4
+            or path.name != "manifest.json"
+            or path.parent.name != f"{summary.sequence:06d}"
+            or path.parents[1].name != _run_model.CHECKPOINT_DIRECTORY
+            or path.parents[2].name != _run_model.CONTROL_DIRECTORY
+        ):
+            raise _run_model.RunStoreError(
+                f"checkpoint delta is outside its run history: {path}",
+                code="checkpoint.artifact_manifest_invalid",
+                details={"path": str(path)},
+            )
+        try:
+            if not stat.S_ISDIR(path.parent.lstat().st_mode):
+                raise OSError("not a checkpoint directory")
+        except OSError as error:
+            raise _run_model.RunStoreError(
+                f"checkpoint directory is invalid: {path.parent}",
+                code="checkpoint.directory_invalid",
+                details={"path": str(path.parent)},
+            ) from error
+        prefix = loaded_checkpoint_index(
+            path.parents[3], through_sequence=summary.sequence - 1
+        )
+        previous = next(
+            (
+                checkpoint
+                for checkpoint in reversed(prefix.checkpoints)
+                if checkpoint.artifacts is not None
+            ),
+            None,
+        )
+    if previous is not None and previous.summary.sequence >= summary.sequence:
+        raise _run_model.RunStoreError(
+            f"checkpoint artifact base does not precede its boundary: {path}",
+            code="checkpoint.artifact_manifest_invalid",
+            details={"path": str(path)},
+        )
     sessions = _checkpoint_sessions(value, path)
     validate_checkpoint_sessions(summary, sessions, path)
     return LoadedCheckpoint(
         summary=summary,
         shards=_checkpoint_shards(value, path),
-        artifacts=_checkpoint_artifacts(value, path),
+        artifacts=_checkpoint_artifacts(value, path, previous),
         sessions=sessions,
         manifest_path=path,
         manifest_signature=signature,
@@ -801,7 +880,9 @@ def checkpoint_directory_signature(
     return file_signature(metadata)
 
 
-def loaded_checkpoint_index(output_dir: pathlib.Path) -> LoadedCheckpointIndex:
+def loaded_checkpoint_index(
+    output_dir: pathlib.Path, /, *, through_sequence: int | None = None
+) -> LoadedCheckpointIndex:
     root = (
         existing_control_directory(output_dir) / _run_model.CHECKPOINT_DIRECTORY
     )
@@ -812,7 +893,14 @@ def loaded_checkpoint_index(output_dir: pathlib.Path) -> LoadedCheckpointIndex:
                 return LoadedCheckpointIndex((), None)
             continue
         try:
-            directories = sorted(root.iterdir(), key=lambda item: item.name)
+            directories = sorted(
+                root.iterdir(),
+                key=lambda item: (
+                    not item.name.isdecimal(),
+                    int(item.name) if item.name.isdecimal() else 0,
+                    item.name,
+                ),
+            )
         except OSError as error:
             if attempt == 0:
                 continue
@@ -822,7 +910,14 @@ def loaded_checkpoint_index(output_dir: pathlib.Path) -> LoadedCheckpointIndex:
                 details={"path": str(root)},
             ) from error
         found: list[LoadedCheckpoint] = []
+        previous: LoadedCheckpoint | None = None
         for directory in directories:
+            if (
+                through_sequence is not None
+                and directory.name.isdecimal()
+                and int(directory.name) > through_sequence
+            ):
+                continue
             manifest_path = directory / "manifest.json"
             if not directory.name.isdecimal() and (
                 not directory.is_dir()
@@ -841,7 +936,9 @@ def loaded_checkpoint_index(output_dir: pathlib.Path) -> LoadedCheckpointIndex:
                     code="checkpoint.directory_invalid",
                     details={"path": str(directory)},
                 ) from error
-            checkpoint = load_checkpoint(manifest_path)
+            checkpoint = load_checkpoint(
+                manifest_path, previous=previous, resolve_previous=False
+            )
             if directory.name != f"{checkpoint.summary.sequence:06d}":
                 raise _run_model.RunStoreError(
                     (
@@ -855,6 +952,8 @@ def loaded_checkpoint_index(output_dir: pathlib.Path) -> LoadedCheckpointIndex:
                     },
                 )
             found.append(checkpoint)
+            if checkpoint.artifacts is not None:
+                previous = checkpoint
         after = checkpoint_directory_signature(output_dir)
         if after != before:
             continue
@@ -866,7 +965,10 @@ def loaded_checkpoint_index(output_dir: pathlib.Path) -> LoadedCheckpointIndex:
                 code="checkpoint.sequence_duplicate",
                 details={"path": str(root)},
             )
-        if sequences != list(range(1, len(sequences) + 1)):
+        expected_count = (
+            len(sequences) if through_sequence is None else through_sequence
+        )
+        if sequences != list(range(1, expected_count + 1)):
             raise _run_model.RunStoreError(
                 f"checkpoint sequence has a gap in {root}",
                 code="checkpoint.sequence_gap",

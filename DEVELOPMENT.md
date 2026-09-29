@@ -64,6 +64,19 @@ Monitoring clients must check `header.project_root` against their project before
 displaying a run. Full `RunStore` reads retain checkpoint validation for explicit
 inspection, resume, and fork.
 
+Checkpoint storage schema 4 writes a full artifact inventory at the first
+artifact-bearing boundary and add-only deltas thereafter. Each delta names the
+previous artifact-bearing checkpoint, including across unavailable boundaries.
+Readers retain shared inventory layers and reconstruct the selected boundary
+when validating or materializing artifacts. Checkpointed files and directory
+modes remain immutable; changes and deletions are integrity errors.
+
+Existing schema 3 checkpoints with full inventories remain readable and can be
+followed by new delta checkpoints. Existing files are not rewritten. Child
+processes still send a complete inventory captured at their execution boundary;
+the parent computes its stored delta without rescanning the child's output.
+Run-history summaries and the child protocol retain their existing versions.
+
 ## Release
 
 [release.yml](.github/workflows/release.yml) runs when a `v*` tag is pushed.

@@ -246,7 +246,7 @@ def _inherited_attempts(root: pathlib.Path, run_id: str) -> set[pathlib.Path]:
         return set()
     return {
         item.relative.parent
-        for item in references[1]
+        for item in references.all_records()[1]
         if item.relative.name == "prompt.txt"
         and item.relative.parent.parent.name == "invocations"
     }

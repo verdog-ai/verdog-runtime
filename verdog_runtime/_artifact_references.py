@@ -32,9 +32,31 @@ class ArtifactFile:
     sha256: str
 
 
-ArtifactReferences: TypeAlias = tuple[
-    tuple[ArtifactDirectory, ...], tuple[ArtifactFile, ...]
-]
+@dataclasses.dataclass(frozen=True, slots=True)
+class ArtifactReferences:
+    """An inventory layer sharing its immutable predecessors in memory."""
+
+    directories: tuple[ArtifactDirectory, ...]
+    files: tuple[ArtifactFile, ...]
+    previous: ArtifactReferences | None = None
+
+    def all_records(
+        self,
+    ) -> tuple[tuple[ArtifactDirectory, ...], tuple[ArtifactFile, ...]]:
+        """Flatten one requested boundary without caching every prefix."""
+        layers: list[ArtifactReferences] = []
+        current: ArtifactReferences | None = self
+        while current is not None:
+            layers.append(current)
+            current = current.previous
+        return (
+            tuple(
+                item for layer in reversed(layers) for item in layer.directories
+            ),
+            tuple(item for layer in reversed(layers) for item in layer.files),
+        )
+
+
 ArtifactCache: TypeAlias = dict[
     pathlib.Path, tuple[_run_metadata.FileSignature, ArtifactFile]
 ]
@@ -351,7 +373,12 @@ def _validate_reference_layout(
 
 
 def decode_artifact_references(
-    raw: object, manifest_path: pathlib.Path, /
+    raw: object,
+    manifest_path: pathlib.Path,
+    /,
+    *,
+    previous: ArtifactReferences | None = None,
+    previous_sequence: int | None = None,
 ) -> ArtifactReferences | None:
     """Decode artifact metadata already read from one checkpoint manifest."""
     if raw is None:
@@ -363,10 +390,14 @@ def decode_artifact_references(
             details={"path": str(manifest_path)},
         )
     artifact = cast(dict[str, Any], raw)
-    if (
-        type(artifact.get("schema_version")) is not int
-        or artifact.get("schema_version") != _ARTIFACT_REFERENCES_VERSION
-        or artifact.get("kind") != "references"
+    version = artifact.get("schema_version")
+    delta = version == 2 and artifact.get("kind") == "delta"
+    if type(version) is not int or not (
+        (
+            version == _ARTIFACT_REFERENCES_VERSION
+            and artifact.get("kind") == "references"
+        )
+        or delta
     ):
         raise _run_model.RunStoreError(
             f"checkpoint has no valid artifact references: {manifest_path}",
@@ -375,8 +406,71 @@ def decode_artifact_references(
         )
     directories = _reference_directories(artifact, manifest_path)
     files = _reference_files(artifact, manifest_path)
-    _validate_reference_layout(directories, files, manifest_path)
-    return directories, files
+    if delta:
+        base = artifact.get("base_sequence")
+        if (
+            type(base) is not int
+            or base <= 0
+            or base != previous_sequence
+            or previous is None
+        ):
+            raise _run_model.RunStoreError(
+                "checkpoint artifact delta has an invalid base: "
+                f"{manifest_path}",
+                code="checkpoint.artifact_manifest_invalid",
+                details={"path": str(manifest_path), "field": "base_sequence"},
+            )
+        inherited_directories, inherited_files = previous.all_records()
+        _validate_reference_layout(
+            (*inherited_directories, *directories),
+            (*inherited_files, *files),
+            manifest_path,
+        )
+    else:
+        previous = None
+        _validate_reference_layout(directories, files, manifest_path)
+    return ArtifactReferences(directories, files, previous)
+
+
+def encode_artifact_references(
+    references: ArtifactReferences,
+    /,
+    *,
+    previous: ArtifactReferences | None = None,
+    base_sequence: int | None = None,
+) -> dict[str, object]:
+    """Encode a full inventory or additions to an immutable predecessor."""
+    directories, files = references.all_records()
+    if previous is not None:
+        previous_directories, previous_files = previous.all_records()
+        directory_paths = {item.relative for item in previous_directories}
+        file_paths = {item.relative for item in previous_files}
+        directories = tuple(
+            item for item in directories if item.relative not in directory_paths
+        )
+        files = tuple(item for item in files if item.relative not in file_paths)
+    result: dict[str, object] = {
+        "schema_version": _ARTIFACT_REFERENCES_VERSION,
+        "kind": "references",
+        "directories": [
+            {"path": item.relative.as_posix(), "mode": item.mode}
+            for item in directories
+        ],
+        "files": [
+            {
+                "path": item.relative.as_posix(),
+                "mode": item.mode,
+                "size": item.size,
+                "sha256": item.sha256,
+            }
+            for item in files
+        ],
+    }
+    if previous is not None:
+        result.update(
+            schema_version=2, kind="delta", base_sequence=base_sequence
+        )
+    return result
 
 
 def validate_artifact_extension(
@@ -385,7 +479,9 @@ def validate_artifact_extension(
     """Validate immutable artifacts; directories may gain children."""
     if previous is None:
         return
-    for old, new in zip(previous, current, strict=True):
+    for old, new in zip(
+        previous.all_records(), current.all_records(), strict=True
+    ):
         indexed = {item.relative: item for item in new}
         for item in old:
             if indexed.get(item.relative) != item:
@@ -417,7 +513,7 @@ def capture_artifacts(
             cache[relative] = (signature, record)
             changed_directories.add(relative.parent)
         files.append(record)
-    current = directories, tuple(files)
+    current = ArtifactReferences(directories, tuple(files))
     validate_artifact_extension(previous, current)
     if (before_directories, before_files) != _scan_artifacts(source_root):
         raise _run_model.RunStoreError(
@@ -429,7 +525,9 @@ def capture_artifacts(
             details={"output_dir": str(source_root)},
         )
     previous_directories: set[pathlib.Path] = (
-        set() if previous is None else {item.relative for item in previous[0]}
+        set()
+        if previous is None
+        else {item.relative for item in previous.all_records()[0]}
     )
     for record in directories:
         if record.relative not in previous_directories:
@@ -440,23 +538,7 @@ def capture_artifacts(
         changed_directories, key=lambda item: len(item.parts), reverse=True
     ):
         _run_metadata.fsync_directory(source_root / relative)
-    return {
-        "schema_version": _ARTIFACT_REFERENCES_VERSION,
-        "kind": "references",
-        "directories": [
-            {"path": item.relative.as_posix(), "mode": item.mode}
-            for item in directories
-        ],
-        "files": [
-            {
-                "path": item.relative.as_posix(),
-                "mode": item.mode,
-                "size": item.size,
-                "sha256": item.sha256,
-            }
-            for item in files
-        ],
-    }
+    return encode_artifact_references(current)
 
 
 def _validate_directories(
@@ -476,7 +558,7 @@ def validate_artifacts(
     cache: ArtifactCache,
 ) -> None:
     """Verify referenced artifacts independently of later outputs."""
-    directories, files = references
+    directories, files = references.all_records()
     _validate_directories(source_root, directories)
     for record in files:
         path = _artifact_file_path(source_root, record.relative)

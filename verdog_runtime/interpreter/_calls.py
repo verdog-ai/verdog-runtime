@@ -56,7 +56,8 @@ def _visible(scope: CallScope, definition_id: ids.GraphId, /) -> bool:
         return False
     owner, separator, _ = target.rpartition("__")
     if not separator:
-        return definition_id == scope.root
+        # Root definitions belong to the project scope and are visible anywhere.
+        return True
     while True:
         if owner == current:
             return True

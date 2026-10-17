@@ -170,6 +170,50 @@ def test_calls_import_exact_modules_and_enforce_lexical_visibility(
         )
 
 
+def test_root_definitions_are_visible_from_every_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modules = {
+        "multi.beta": "multi.subroutines.beta",
+        "multi.alpha__helper": "multi.subroutines.alpha.subroutines.helper",
+    }
+    definitions = {name: _definition(name) for name in modules}
+    for name, module in modules.items():
+        _module(monkeypatch, module, definitions[name])
+
+    scope = CallScope(
+        GraphId("multi.alpha"), GraphId("multi.alpha"), GraphId("multi.alpha")
+    )
+    helper, helper_scope = local_subroutine(
+        tmp_path,
+        scope,
+        _subroutine_call("multi.alpha__helper", modules["multi.alpha__helper"]),
+    )
+    assert helper is definitions["multi.alpha__helper"]
+    for current in (scope, helper_scope):
+        sibling, sibling_scope = local_subroutine(
+            tmp_path,
+            current,
+            _subroutine_call("multi.beta", modules["multi.beta"]),
+        )
+        assert sibling is definitions["multi.beta"]
+    require_local_workflow(
+        helper_scope, _workflow_call("multi.beta", "multi.workflows.beta")
+    )
+    with pytest.raises(LookupError, match="not lexically visible"):
+        local_subroutine(
+            tmp_path,
+            sibling_scope,
+            _subroutine_call(
+                "multi.alpha__helper", modules["multi.alpha__helper"]
+            ),
+        )
+    with pytest.raises(LookupError, match="not lexically visible"):
+        require_local_workflow(
+            scope, _workflow_call("other.beta", "other.workflows.beta")
+        )
+
+
 def test_external_subroutine_needs_no_project_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

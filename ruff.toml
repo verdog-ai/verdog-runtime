@@ -21,7 +21,8 @@ ban-relative-imports = "all"
 
 [lint.per-file-ignores]
 # Test names and assertions document the behavior; helpers need no public API docs.
-"tests/**" = ["D"]
+"**/tests/**" = ["D"]
+"**/test_*.py" = ["D"]
 
 [format]
 docstring-code-format = true

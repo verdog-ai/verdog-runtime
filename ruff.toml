@@ -8,6 +8,11 @@ extend-exclude = ["standards/languages/*/examples"]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "TID252", "D"]
 ignore = ["UP040", "UP046", "UP047"]
 
+# The formatter keeps code at 80 columns; strings and comments it cannot wrap
+# may reach 100.
+[lint.pycodestyle]
+max-line-length = 100
+
 [lint.pydocstyle]
 convention = "google"
 

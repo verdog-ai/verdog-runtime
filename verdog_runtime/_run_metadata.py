@@ -908,6 +908,60 @@ def _require_checkpoint_directory(directory: pathlib.Path) -> None:
         ) from error
 
 
+def _load_checkpoint_directories(
+    directories: list[pathlib.Path], through_sequence: int | None
+) -> list[LoadedCheckpoint]:
+    found: list[LoadedCheckpoint] = []
+    previous: LoadedCheckpoint | None = None
+    for directory in directories:
+        if _skipped_checkpoint_directory(directory, through_sequence):
+            continue
+        _require_checkpoint_directory(directory)
+        manifest_path = directory / "manifest.json"
+        checkpoint = load_checkpoint(
+            manifest_path, previous=previous, resolve_previous=False
+        )
+        if directory.name != f"{checkpoint.summary.sequence:06d}":
+            raise _run_model.RunStoreError(
+                (
+                    f"checkpoint directory does not match its "
+                    f"sequence: {directory}"
+                ),
+                code="checkpoint.sequence_mismatch",
+                details={
+                    "path": str(directory),
+                    "sequence": checkpoint.summary.sequence,
+                },
+            )
+        found.append(checkpoint)
+        if checkpoint.artifacts is not None:
+            previous = checkpoint
+    return found
+
+
+def _require_contiguous_sequences(
+    ordered: tuple[LoadedCheckpoint, ...],
+    root: pathlib.Path,
+    through_sequence: int | None,
+) -> None:
+    sequences = [item.summary.sequence for item in ordered]
+    if len(sequences) != len(set(sequences)):
+        raise _run_model.RunStoreError(
+            f"duplicate checkpoint sequences in {root}",
+            code="checkpoint.sequence_duplicate",
+            details={"path": str(root)},
+        )
+    expected_count = (
+        len(sequences) if through_sequence is None else through_sequence
+    )
+    if sequences != list(range(1, expected_count + 1)):
+        raise _run_model.RunStoreError(
+            f"checkpoint sequence has a gap in {root}",
+            code="checkpoint.sequence_gap",
+            details={"path": str(root), "sequences": sequences},
+        )
+
+
 def loaded_checkpoint_index(
     output_dir: pathlib.Path, /, *, through_sequence: int | None = None
 ) -> LoadedCheckpointIndex:
@@ -937,51 +991,12 @@ def loaded_checkpoint_index(
                 code="checkpoint.directory_invalid",
                 details={"path": str(root)},
             ) from error
-        found: list[LoadedCheckpoint] = []
-        previous: LoadedCheckpoint | None = None
-        for directory in directories:
-            if _skipped_checkpoint_directory(directory, through_sequence):
-                continue
-            _require_checkpoint_directory(directory)
-            manifest_path = directory / "manifest.json"
-            checkpoint = load_checkpoint(
-                manifest_path, previous=previous, resolve_previous=False
-            )
-            if directory.name != f"{checkpoint.summary.sequence:06d}":
-                raise _run_model.RunStoreError(
-                    (
-                        f"checkpoint directory does not match its "
-                        f"sequence: {directory}"
-                    ),
-                    code="checkpoint.sequence_mismatch",
-                    details={
-                        "path": str(directory),
-                        "sequence": checkpoint.summary.sequence,
-                    },
-                )
-            found.append(checkpoint)
-            if checkpoint.artifacts is not None:
-                previous = checkpoint
+        found = _load_checkpoint_directories(directories, through_sequence)
         after = checkpoint_directory_signature(output_dir)
         if after != before:
             continue
         ordered = tuple(sorted(found, key=lambda item: item.summary.sequence))
-        sequences = [item.summary.sequence for item in ordered]
-        if len(sequences) != len(set(sequences)):
-            raise _run_model.RunStoreError(
-                f"duplicate checkpoint sequences in {root}",
-                code="checkpoint.sequence_duplicate",
-                details={"path": str(root)},
-            )
-        expected_count = (
-            len(sequences) if through_sequence is None else through_sequence
-        )
-        if sequences != list(range(1, expected_count + 1)):
-            raise _run_model.RunStoreError(
-                f"checkpoint sequence has a gap in {root}",
-                code="checkpoint.sequence_gap",
-                details={"path": str(root), "sequences": sequences},
-            )
+        _require_contiguous_sequences(ordered, root, through_sequence)
         return LoadedCheckpointIndex(ordered, after)
     raise _run_model.RunStoreError(
         f"checkpoint directory changed while it was read: {root}",

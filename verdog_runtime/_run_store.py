@@ -31,7 +31,9 @@ from verdog_runtime._artifact_references import (
 from verdog_runtime._artifact_references import (
     validate_artifacts as _validate_artifacts,
 )
-from verdog_runtime._file_lock import FileLockUnavailable as _LockUnavailable
+from verdog_runtime._file_lock import (
+    FileLockUnavailableError as _LockUnavailable,
+)
 from verdog_runtime._relative_path import strict_posix_relative_parts
 from verdog_runtime._run_metadata import (
     FileSignature,

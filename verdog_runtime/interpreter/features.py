@@ -162,71 +162,66 @@ def effects_satisfied(
     for effect in effects:
         feature = features[effect.feature_id]
         if isinstance(effect, graph_declarations.EnumFeatureEffect):
-            if (
-                effect.observation
-                is graph_declarations.EnumEffectObservation.UNCONSTRAINED
-            ):
-                _initialized(feature, successor)
-                continue
-            if (
-                effect.observation
-                is graph_declarations.EnumEffectObservation.UNCHANGED
-            ):
-                if _raw(feature, successor) != _raw(feature, source):
-                    return False
-                continue
-            if (
-                effect.observation
-                is graph_declarations.EnumEffectObservation.EQUAL
-            ):
-                if _initialized(feature, successor) != effect.value:
-                    return False
-                continue
-            raise ValueError(f"unknown enum effect: {effect.observation}")
-        if isinstance(effect, graph_declarations.BooleanFeatureEffect):
-            if (
-                effect.observation
-                is graph_declarations.BooleanEffectObservation.UNCONSTRAINED
-            ):
-                _initialized(feature, successor)
-                continue
-            if (
-                effect.observation
-                is graph_declarations.BooleanEffectObservation.UNCHANGED
-            ):
-                if _raw(feature, successor) != _raw(feature, source):
-                    return False
-                continue
-            target = _initialized(feature, successor)
-            expected = (
-                effect.observation
-                is graph_declarations.BooleanEffectObservation.POSITIVE
-            )
-            if target is not expected:
-                return False
-            continue
-
-        if (
-            effect.observation
-            is graph_declarations.NumericalEffectObservation.UNCONSTRAINED
-        ):
-            _initialized(feature, successor)
-            continue
-        if (
-            effect.observation
-            is graph_declarations.NumericalEffectObservation.UNCHANGED
-        ):
-            if _raw(feature, successor) != _raw(feature, source):
-                return False
-            continue
-        before = cast(int | float, _initialized(feature, source))
-        after = cast(int | float, _initialized(feature, successor))
-        if (
-            effect.observation
-            is graph_declarations.NumericalEffectObservation.INCREASES
-        ):
-            if after <= before:
-                return False
-        elif after >= before:
+            holds = _enum_effect_holds(effect, feature, source, successor)
+        elif isinstance(effect, graph_declarations.BooleanFeatureEffect):
+            holds = _boolean_effect_holds(effect, feature, source, successor)
+        else:
+            holds = _numerical_effect_holds(effect, feature, source, successor)
+        if not holds:
             return False
     return True
+
+
+def _enum_effect_holds(
+    effect: graph_declarations.EnumFeatureEffect,
+    feature: graph_declarations.FeatureDefinition[Any, ScopeT],
+    source: state_declarations.WorkflowState[ScopeT],
+    successor: state_declarations.WorkflowState[ScopeT],
+) -> bool:
+    observation = effect.observation
+    if observation is graph_declarations.EnumEffectObservation.UNCONSTRAINED:
+        _initialized(feature, successor)
+        return True
+    if observation is graph_declarations.EnumEffectObservation.UNCHANGED:
+        return _raw(feature, successor) == _raw(feature, source)
+    if observation is graph_declarations.EnumEffectObservation.EQUAL:
+        return _initialized(feature, successor) == effect.value
+    raise ValueError(f"unknown enum effect: {observation}")
+
+
+def _boolean_effect_holds(
+    effect: graph_declarations.BooleanFeatureEffect,
+    feature: graph_declarations.FeatureDefinition[Any, ScopeT],
+    source: state_declarations.WorkflowState[ScopeT],
+    successor: state_declarations.WorkflowState[ScopeT],
+) -> bool:
+    observation = effect.observation
+    if observation is graph_declarations.BooleanEffectObservation.UNCONSTRAINED:
+        _initialized(feature, successor)
+        return True
+    if observation is graph_declarations.BooleanEffectObservation.UNCHANGED:
+        return _raw(feature, successor) == _raw(feature, source)
+    expected = (
+        observation is graph_declarations.BooleanEffectObservation.POSITIVE
+    )
+    return _initialized(feature, successor) is expected
+
+
+def _numerical_effect_holds(
+    effect: graph_declarations.NumericalFeatureEffect,
+    feature: graph_declarations.FeatureDefinition[Any, ScopeT],
+    source: state_declarations.WorkflowState[ScopeT],
+    successor: state_declarations.WorkflowState[ScopeT],
+) -> bool:
+    observation = effect.observation
+    numerical = graph_declarations.NumericalEffectObservation
+    if observation is numerical.UNCONSTRAINED:
+        _initialized(feature, successor)
+        return True
+    if observation is numerical.UNCHANGED:
+        return _raw(feature, successor) == _raw(feature, source)
+    before = cast(int | float, _initialized(feature, source))
+    after = cast(int | float, _initialized(feature, successor))
+    if observation is numerical.INCREASES:
+        return after > before
+    return after < before

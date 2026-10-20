@@ -1,0 +1,10 @@
+name: Standards
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  standards:
+    uses: verdog-ai/standards/.github/workflows/check.yml@main

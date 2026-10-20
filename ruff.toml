@@ -1,0 +1,27 @@
+# Written by `verdog-standards sync` from verdog-ai/standards; edit it there.
+line-length = 80
+target-version = "py312"
+# The examples of the standards violate their rules on purpose.
+extend-exclude = ["standards/languages/*/examples"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "TID252", "D"]
+ignore = ["UP040", "UP046", "UP047"]
+
+# The formatter keeps code at 80 columns; strings and comments it cannot wrap
+# may reach 100.
+[lint.pycodestyle]
+max-line-length = 100
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[lint.per-file-ignores]
+# Test names and assertions document the behavior; helpers need no public API docs.
+"tests/**" = ["D"]
+
+[format]
+docstring-code-format = true

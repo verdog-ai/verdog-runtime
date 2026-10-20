@@ -3,14 +3,12 @@
   "pythonVersion": "3.12",
   "venvPath": ".",
   "venv": ".venv",
-  "include": [
-    "verdog_runtime",
-    "tests"
-  ],
   "exclude": [
     ".venv",
+    ".verdog",
     "build",
     "dist",
+    "node_modules",
     "**/__pycache__"
   ],
   "reportMissingImports": "error",

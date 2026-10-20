@@ -9,7 +9,8 @@
     "build",
     "dist",
     "node_modules",
-    "**/__pycache__"
+    "**/__pycache__",
+    "**/fixtures"
   ],
   "reportMissingImports": "error",
   "reportMissingModuleSource": "error",

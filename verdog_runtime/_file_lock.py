@@ -9,7 +9,7 @@ from collections.abc import Generator
 from typing import BinaryIO, Protocol, cast
 
 
-class FileLockUnavailable(Exception):
+class FileLockUnavailableError(Exception):
     """The requested nonblocking advisory lock is already held."""
 
 
@@ -38,7 +38,7 @@ def _lock_windows(stream: BinaryIO, *, blocking: bool) -> None:
     try:
         msvcrt.locking(stream.fileno(), mode, 1)
     except OSError as error:
-        raise FileLockUnavailable from error
+        raise FileLockUnavailableError from error
 
 
 def _unlock_windows(stream: BinaryIO) -> None:
@@ -55,7 +55,7 @@ def _lock_posix(stream: BinaryIO, *, blocking: bool) -> None:
     try:
         fcntl.flock(stream.fileno(), flags)
     except BlockingIOError as error:
-        raise FileLockUnavailable from error
+        raise FileLockUnavailableError from error
 
 
 def _unlock_posix(stream: BinaryIO) -> None:

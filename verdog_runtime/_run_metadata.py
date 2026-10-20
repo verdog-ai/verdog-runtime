@@ -880,6 +880,34 @@ def checkpoint_directory_signature(
     return file_signature(metadata)
 
 
+def _skipped_checkpoint_directory(
+    directory: pathlib.Path, through_sequence: int | None
+) -> bool:
+    if directory.name.isdecimal():
+        return through_sequence is not None and (
+            int(directory.name) > through_sequence
+        )
+    return (
+        not directory.is_dir()
+        or directory.is_symlink()
+        or not (directory / "manifest.json").exists()
+    )
+
+
+def _require_checkpoint_directory(directory: pathlib.Path) -> None:
+    # Numbered directories are committed atomically from staging. An
+    # incomplete or unsafe entry is corruption, not an older boundary.
+    try:
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise OSError("not a checkpoint directory")
+    except OSError as error:
+        raise _run_model.RunStoreError(
+            f"checkpoint directory is invalid: {directory}",
+            code="checkpoint.directory_invalid",
+            details={"path": str(directory)},
+        ) from error
+
+
 def loaded_checkpoint_index(
     output_dir: pathlib.Path, /, *, through_sequence: int | None = None
 ) -> LoadedCheckpointIndex:
@@ -912,30 +940,10 @@ def loaded_checkpoint_index(
         found: list[LoadedCheckpoint] = []
         previous: LoadedCheckpoint | None = None
         for directory in directories:
-            if (
-                through_sequence is not None
-                and directory.name.isdecimal()
-                and int(directory.name) > through_sequence
-            ):
+            if _skipped_checkpoint_directory(directory, through_sequence):
                 continue
+            _require_checkpoint_directory(directory)
             manifest_path = directory / "manifest.json"
-            if not directory.name.isdecimal() and (
-                not directory.is_dir()
-                or directory.is_symlink()
-                or not manifest_path.exists()
-            ):
-                continue
-            # Numbered directories are committed atomically from staging. An
-            # incomplete or unsafe entry is corruption, not an older boundary.
-            try:
-                if not stat.S_ISDIR(directory.lstat().st_mode):
-                    raise OSError("not a checkpoint directory")
-            except OSError as error:
-                raise _run_model.RunStoreError(
-                    f"checkpoint directory is invalid: {directory}",
-                    code="checkpoint.directory_invalid",
-                    details={"path": str(directory)},
-                ) from error
             checkpoint = load_checkpoint(
                 manifest_path, previous=previous, resolve_previous=False
             )
@@ -1070,7 +1078,7 @@ def run_is_active(output_dir: pathlib.Path) -> bool:
     try:
         with exclusive_file(lock, blocking=False):
             return False
-    except _file_lock.FileLockUnavailable:
+    except _file_lock.FileLockUnavailableError:
         return True
 
 

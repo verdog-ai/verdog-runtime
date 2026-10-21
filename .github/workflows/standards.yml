@@ -1,3 +1,8 @@
+# The lint check: plumbcheck's action at a commit checks the repository out,
+# installs plumbcheck and its linters and lints with this repository's
+# plumbcheck.yml (the files changed since the base on a pull request, every
+# file on main). Builds and tests run in tests.yml. The organization's
+# ruleset requires the job's name: `standards`.
 name: Standards
 
 on:
@@ -5,6 +10,11 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   standards:
-    uses: verdog-ai/standards/.github/workflows/check.yml@main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: drexlerd/plumbcheck@b2eede802ffce1d84b63340a879f808934c35011

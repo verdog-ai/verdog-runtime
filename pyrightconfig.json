@@ -1,36 +1,21 @@
+// Written by `verdog-standards sync` from verdog-ai/standards; edit it there.
+// Only settings that differ from pyright's defaults, each with its reason.
 {
+  // The strict rule set (default: standard).
   "typeCheckingMode": "strict",
+  // The oldest Python the organization supports (default: the interpreter's).
   "pythonVersion": "3.12",
+  // Resolve imports in the project's uv environment (default: the PATH's).
   "venvPath": ".",
   "venv": ".venv",
-  "exclude": [
-    ".venv",
-    ".verdog",
-    "build",
-    "dist",
-    "node_modules",
-    "**/__pycache__",
-    "**/fixtures"
-  ],
-  "reportMissingImports": "error",
+  // Environments, build output and fixtures; the list replaces the default
+  // one, so node_modules and __pycache__ are named again.
+  "exclude": [".venv", ".verdog", "build", "dist", "node_modules", "**/__pycache__", "**/fixtures"],
+  // A module with stubs but no installed source is an error, not a warning.
   "reportMissingModuleSource": "error",
-  "reportMissingTypeStubs": "error",
-  "reportUnknownVariableType": "error",
-  "reportUnknownParameterType": "error",
-  "reportUnknownArgumentType": "error",
-  "reportUnknownLambdaType": "error",
-  "reportUnknownMemberType": "error",
-  "reportUntypedFunctionDecorator": "error",
-  "reportUntypedClassDecorator": "error",
-  "reportPrivateImportUsage": "error",
+  // Off even in strict mode: overrides need @override, and unneeded ignores and
+  // unreachable code are errors.
   "reportImplicitOverride": "error",
-  "reportUnusedImport": "error",
-  "reportUnusedVariable": "error",
-  "reportDuplicateImport": "error",
   "reportUnnecessaryTypeIgnoreComment": "error",
-  "reportAssertAlwaysTrue": "error",
-  "reportUnreachable": "error",
-  "reportInvalidTypeVarUse": "error",
-  "reportInvalidTypeForm": "error",
-  "stubPath": "typings"
+  "reportUnreachable": "error"
 }

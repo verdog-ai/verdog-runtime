@@ -1,2 +1,2 @@
 # verdog-ai's standards (plumbcheck); override keys below.
-EXTENDS: https://raw.githubusercontent.com/verdog-ai/standards/313811a462519fe89be1041d73fb091388f02fdc/plumbcheck.yml
+EXTENDS: https://raw.githubusercontent.com/verdog-ai/standards/bfb6d17992ba011b4733e1ff87e27331e269fd7b/plumbcheck.yml

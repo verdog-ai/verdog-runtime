@@ -1,11 +1,11 @@
-# Written by `verdog-standards sync` from verdog-ai/standards; edit it there.
+# Written by `plumbcheck sync` from verdog-ai/standards; edit it there.
 # Only settings that differ from ruff's defaults, each with its reason.
 
 # Narrower than the default 88, so two files fit side by side.
 line-length = 80
 # The oldest Python the organization supports.
 target-version = "py312"
-# `verdog-standards lint` passes the files; the excludes below still apply.
+# `plumbcheck lint` passes the files; the excludes below still apply.
 force-exclude = true
 # The examples of the standards violate their rules on purpose.
 extend-exclude = ["standards/languages/*/examples"]

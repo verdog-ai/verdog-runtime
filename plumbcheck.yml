@@ -1,2 +1,3 @@
-# verdog-ai's standards (plumbcheck); override keys below.
-EXTENDS: https://raw.githubusercontent.com/verdog-ai/standards/bfb6d17992ba011b4733e1ff87e27331e269fd7b/plumbcheck.yml
+# plumbcheck's configuration (https://github.com/drexlerd/plumbcheck): only
+# what differs from its defaults; every linter of its catalogue runs on the
+# files it checks. The linters read this repository's own configurations.

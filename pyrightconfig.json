@@ -1,4 +1,4 @@
-// Written by `verdog-standards sync` from verdog-ai/standards; edit it there.
+// Written by `plumbcheck sync` from verdog-ai/standards; edit it there.
 // Only settings that differ from pyright's defaults, each with its reason.
 {
   // The strict rule set (default: standard).

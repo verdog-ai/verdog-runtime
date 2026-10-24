@@ -1,4 +1,4 @@
-# The repository's own build and tests; plumbcheck only lints (standards.yml).
+# The repository's own build and tests; peachycheck only lints (standards.yml).
 name: Tests
 
 on:

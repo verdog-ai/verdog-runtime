@@ -17,7 +17,7 @@ jobs:
   standards:
     runs-on: ubuntu-latest
     steps:
-      - uses: drexlerd/peachycheck@343fddca95ebb4eb277a5598bae6af8ea0aac863
+      - uses: drexlerd/peachycheck@v0.1.0
         with:
           # pyright resolves imports in the repository's environment.
           prepare: uv sync --locked

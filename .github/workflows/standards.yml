@@ -1,6 +1,6 @@
-# The lint check: plumbcheck's action at a commit checks the repository out,
-# installs plumbcheck and its linters and lints with this repository's
-# plumbcheck.yml (the files changed since the base on a pull request, every
+# The lint check: peachycheck's action at a commit checks the repository out,
+# installs peachycheck and its linters and lints with this repository's
+# peachycheck.yml (the files changed since the base on a pull request, every
 # file on main). Builds and tests run in tests.yml. The organization's
 # ruleset requires the job's name: `standards`.
 name: Standards
@@ -17,4 +17,7 @@ jobs:
   standards:
     runs-on: ubuntu-latest
     steps:
-      - uses: drexlerd/plumbcheck@b2eede802ffce1d84b63340a879f808934c35011
+      - uses: drexlerd/peachycheck@343fddca95ebb4eb277a5598bae6af8ea0aac863
+        with:
+          # pyright resolves imports in the repository's environment.
+          prepare: uv sync --locked

@@ -5,7 +5,7 @@
 line-length = 80
 # The oldest Python the organization supports.
 target-version = "py312"
-# `plumbcheck lint` passes the files; the excludes below still apply.
+# `peachycheck lint` passes the files; the excludes below still apply.
 force-exclude = true
 
 [lint]

@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import stat
+from collections import Counter
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from typing import TypeAlias, cast
@@ -22,6 +23,9 @@ HEADERS = (
     "Output tokens",
     "Est. USD",
 )
+TOOL_HEADERS = ("Tool", "Server", "Calls", "Errors", "Subagent")
+# One recorded call: name, MCP server (None for built-ins), error, subagent.
+ToolCall: TypeAlias = tuple[str, str | None, bool, bool]
 
 
 @dataclasses.dataclass(slots=True)
@@ -69,8 +73,17 @@ class UsageTotals:
     amounts: dict[str, _Amount] = dataclasses.field(
         default_factory=lambda: {column: _Amount() for column in _COLUMNS}
     )
+    tools: Counter[ToolCall] = dataclasses.field(
+        default_factory=Counter[ToolCall]
+    )
+    tools_unknown: int = 0
 
-    def include(self, usage: Mapping[str, object] | None, /) -> None:
+    def include(
+        self,
+        usage: Mapping[str, object] | None,
+        /,
+        tool_calls: object = None,
+    ) -> None:
         """Include one actual attempt, including failed or unmeasured calls."""
         self.calls += 1
         for column, amount in self.amounts.items():
@@ -78,12 +91,34 @@ class UsageTotals:
                 None if usage is None else usage.get(column),
                 cost=column == "cost_usd",
             )
+        calls = _tool_calls(tool_calls)
+        if calls is None:
+            self.tools_unknown += 1
+        else:
+            self.tools.update(calls)
 
     def merge(self, other: UsageTotals, /) -> None:
         """Accumulate disjoint node rows without losing unknown values."""
         self.calls += other.calls
         for column, amount in self.amounts.items():
             amount.merge(other.amounts[column])
+        self.tools.update(other.tools)
+        self.tools_unknown += other.tools_unknown
+
+    def tool_rows(self) -> list[tuple[str, str, int, int, int]]:
+        """Count calls, errors, and subagent calls per tool and server."""
+        rows: dict[tuple[str, str], list[int]] = {}
+        for (name, server, error, subagent), count in self.tools.items():
+            row = rows.setdefault((name, server or ""), [0, 0, 0])
+            row[0] += count
+            row[1] += count if error else 0
+            row[2] += count if subagent else 0
+        return [
+            (name, server, calls, errors, subagent)
+            for (name, server), (calls, errors, subagent) in sorted(
+                rows.items()
+            )
+        ]
 
     def cells(self, node_type: str | None = None) -> tuple[str, ...]:
         """Distinguish inapplicable, missing, and partially measured usage."""
@@ -101,6 +136,29 @@ class UsageTotals:
                 for column in _COLUMNS
             ),
         )
+
+
+def _tool_calls(value: object) -> list[ToolCall] | None:
+    """Reject the whole attempt if any recorded call is malformed."""
+    if not isinstance(value, list):
+        return None
+    calls: list[ToolCall] = []
+    for raw in cast(list[object], value):
+        if not isinstance(raw, dict):
+            return None
+        call = cast(dict[str, object], raw)
+        name, server = call.get("name"), call.get("server")
+        error, subagent = call.get("error"), call.get("subagent")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not (server is None or (isinstance(server, str) and server))
+            or not isinstance(error, bool)
+            or not isinstance(subagent, bool)
+        ):
+            return None
+        calls.append((name, server, error, subagent))
+    return calls
 
 
 def _object(path: pathlib.Path) -> dict[str, object] | None:
@@ -286,6 +344,7 @@ def collect(
             continue
         record = _object(attempt / "usage.json")
         usage: Mapping[str, object] | None = None
+        tool_calls: object = None
         if record is not None:
             if record.get("replayed") is True:
                 continue
@@ -308,5 +367,6 @@ def collect(
                 raw_usage = record.get("usage")
                 if isinstance(raw_usage, dict):
                     usage = cast(dict[str, object], raw_usage)
-        result.setdefault(identity, UsageTotals()).include(usage)
+                tool_calls = record.get("tool_calls")
+        result.setdefault(identity, UsageTotals()).include(usage, tool_calls)
     return result

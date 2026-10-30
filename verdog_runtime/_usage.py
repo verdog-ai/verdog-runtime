@@ -159,12 +159,17 @@ def _delta(
 
 
 def capture(
-    directory: pathlib.Path, snapshot: dict[str, object] | None
+    directory: pathlib.Path,
+    snapshot: dict[str, object] | None,
+    *,
+    tool_calls: list[dict[str, object]] | None = None,
 ) -> None:
     """Called by built-in providers after their subprocess has stopped."""
     record = _read(directory)
     if record is None:
         return
+    # Calls come from this invocation's own events, so they need no delta.
+    record["tool_calls"] = tool_calls
     snapshot = validate_snapshot(snapshot)
     record["snapshot"] = snapshot
     if snapshot is not None:

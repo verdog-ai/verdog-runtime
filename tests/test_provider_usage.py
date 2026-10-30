@@ -45,6 +45,93 @@ def _codex_events() -> str:
     )
 
 
+def test_claude_tool_calls_mark_mcp_servers_errors_and_subagents() -> None:
+    def use(
+        identifier: str, name: str, parent: str | None = None
+    ) -> dict[str, object]:
+        return {
+            "type": "assistant",
+            "parent_tool_use_id": parent,
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "plan"},
+                    {"type": "tool_use", "id": identifier, "name": name},
+                ]
+            },
+        }
+
+    events = _events(
+        use("a", "Read"),
+        use("b", "mcp__planner__solve"),
+        use("c", "mcp__planner__solve", parent="x"),
+        use("d", "mcp__broken"),
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "b",
+                        "is_error": True,
+                    }
+                ]
+            },
+        },
+    )
+    assert _usage.tool_calls("bad json\n[]\n" + events, "claude") == [
+        {"name": "Read", "server": None, "error": False, "subagent": False},
+        {
+            "name": "mcp__planner__solve",
+            "server": "planner",
+            "error": True,
+            "subagent": False,
+        },
+        {
+            "name": "mcp__planner__solve",
+            "server": "planner",
+            "error": False,
+            "subagent": True,
+        },
+        {
+            "name": "mcp__broken",
+            "server": None,
+            "error": False,
+            "subagent": False,
+        },
+    ]
+
+
+def test_codex_tool_calls_use_item_types_and_mcp_names() -> None:
+    def item(**fields: object) -> dict[str, object]:
+        return {"type": "item.completed", "item": {"id": "i", **fields}}
+
+    events = _events(
+        item(type="agent_message", text="done"),
+        item(type="reasoning", text="plan"),
+        item(type="command_execution", status="completed", exit_code=0),
+        item(type="command_execution", status="declined"),
+        item(type="mcp_tool_call", server="planner", tool="solve", error=None),
+        item(
+            type="mcp_tool_call",
+            server="planner",
+            tool="solve",
+            status="failed",
+            error={"message": "no plan"},
+        ),
+        {"type": "item.started", "item": {"type": "web_search"}},
+    )
+    calls = _usage.tool_calls(events, "codex")
+    assert calls is not None
+    assert [(c["name"], c["server"], c["error"]) for c in calls] == [
+        ("command_execution", None, False),
+        ("command_execution", None, True),
+        ("solve", "planner", False),
+        ("solve", "planner", True),
+    ]
+    assert _usage.tool_calls(events, "other") is None
+    assert _usage.tool_calls("", "claude") == []
+
+
 def test_codex_preserves_cumulative_categories_and_never_guesses_model() -> (
     None
 ):
@@ -272,7 +359,13 @@ def test_usage_capture_survives_every_provider_exit(
             raise AgentInvocationError("invalid reply")
         return "reply", None, ""
 
-    def capture(_path: Path, value: dict[str, object] | None) -> None:
+    def capture(
+        _path: Path,
+        value: dict[str, object] | None,
+        *,
+        tool_calls: list[dict[str, object]] | None,
+    ) -> None:
+        assert tool_calls == []
         captured.append(value)
         raise OSError("accounting failure cannot mask provider outcome")
 
@@ -330,7 +423,12 @@ def test_claude_version_probe_is_bounded_cached_and_cleans_up(
     def cleanup(process: object, *, owns_group: bool) -> None:
         cleaned.append(process)
 
-    def capture(_path: Path, value: dict[str, object] | None) -> None:
+    def capture(
+        _path: Path,
+        value: dict[str, object] | None,
+        *,
+        tool_calls: object = None,
+    ) -> None:
         snapshots.append(value)
 
     monkeypatch.setattr(_command.subprocess, "Popen", Probe)
@@ -370,7 +468,12 @@ def test_cancelled_accounting_keeps_usage_without_launching_version_probe(
     def probe(_executable: str, _workspace: Path) -> None:
         pytest.fail("cancelled accounting must not launch a provider probe")
 
-    def capture(_path: Path, value: dict[str, object] | None) -> None:
+    def capture(
+        _path: Path,
+        value: dict[str, object] | None,
+        *,
+        tool_calls: object = None,
+    ) -> None:
         snapshots.append(value)
 
     monkeypatch.setattr(_command, "_provider_version", probe)

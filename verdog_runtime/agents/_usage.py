@@ -90,6 +90,94 @@ def snapshot(
     return None
 
 
+def tool_calls(events: str, provider: str) -> list[dict[str, object]] | None:
+    """List every tool call of one invocation; reports filter them later."""
+    records = [
+        _object(value)
+        for line in events.splitlines()
+        if (value := _json(line)) is not None
+    ]
+    if provider == "claude":
+        return _claude_tools(records)
+    if provider == "codex":
+        return _codex_tools(records)
+    return None
+
+
+def _json(line: str) -> object:
+    try:
+        return cast(object, json.loads(line))
+    except json.JSONDecodeError:
+        return None
+
+
+def _blocks(event: dict[str, object]) -> list[dict[str, object]]:
+    content = _object(event.get("message")).get("content")
+    if not isinstance(content, list):
+        return []
+    return [_object(block) for block in cast(list[object], content)]
+
+
+def _claude_tools(
+    records: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    failed = {
+        block.get("tool_use_id")
+        for event in records
+        if event.get("type") == "user"
+        for block in _blocks(event)
+        if block.get("type") == "tool_result" and block.get("is_error") is True
+    }
+    calls: list[dict[str, object]] = []
+    for event in records:
+        if event.get("type") != "assistant":
+            continue
+        for block in _blocks(event):
+            name = _text(block.get("name"))
+            if block.get("type") != "tool_use" or name is None:
+                continue
+            # MCP tools are named mcp__<server>__<tool>; built-ins have no server.
+            server, _, tool = name.removeprefix("mcp__").partition("__")
+            mcp = name.startswith("mcp__") and bool(server and tool)
+            calls.append(
+                {
+                    "name": name,
+                    "server": server if mcp else None,
+                    "error": block.get("id") in failed,
+                    "subagent": _text(event.get("parent_tool_use_id"))
+                    is not None,
+                }
+            )
+    return calls
+
+
+def _codex_tools(
+    records: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+    for event in records:
+        item = _object(event.get("item"))
+        kind = _text(item.get("type"))
+        if event.get("type") != "item.completed" or kind in (
+            None,
+            "agent_message",
+            "reasoning",
+            "error",
+        ):
+            continue
+        mcp = kind == "mcp_tool_call"
+        calls.append(
+            {
+                "name": (_text(item.get("tool")) if mcp else None) or kind,
+                "server": _text(item.get("server")) if mcp else None,
+                "error": item.get("status") in ("failed", "declined")
+                or item.get("error") is not None,
+                "subagent": False,
+            }
+        )
+    return calls
+
+
 def _codex_override(command: Sequence[str]) -> bool:
     for index, argument in enumerate(command):
         option = argument.partition("=")[0]

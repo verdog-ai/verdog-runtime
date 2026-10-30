@@ -292,6 +292,10 @@ def _capture_usage(
                 ),
                 command=command,
             )
-        usage_ledger.capture(request.artifact_dir, value)
+        usage_ledger.capture(
+            request.artifact_dir,
+            value,
+            tool_calls=provider_usage.tool_calls(events, provider),
+        )
     except Exception:
         pass

@@ -459,6 +459,50 @@ def test_usage_extends_existing_tables_and_survives_timing_rollback(
     assert report.endswith("- [child](child/stats.md)\n")
 
 
+def test_tools_sections_list_every_tool_before_calls(tmp_path: Path) -> None:
+    from test_usage_reports import (
+        _attempt,  # pyright: ignore[reportPrivateUsage]
+        _call,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    _attempt(
+        tmp_path,
+        ".",
+        "agent",
+        tool_calls=(_call("Read"), _call("mcp__p__solve", server="p")),
+    )
+    _attempt(tmp_path, ".", "agent", visit="000002", tool_calls=None)
+    statistics = RunStatistics(tmp_path)
+    statistics.bind(
+        run_id="current",
+        graph_path=Path(),
+        project_path=".",
+        graph_id="main",
+        node_paths={"agent": (".", "main", "agent", "agent")},
+    )
+    statistics.restore(_statistics.EMPTY_STATISTICS)
+    (tmp_path / "stats.md").write_text(
+        "old\n\n## Calls\n\n- [child](child/stats.md)\n"
+    )
+    statistics.write()
+    statistics.write()
+
+    tools = _rows(tmp_path, "Tools")
+    assert tools[0] == ["Tool", "Server", "Calls", "Errors", "Subagent"]
+    assert tools[2:] == [
+        ["Read", "", "1", "0", "0"],
+        ["mcp__p__solve", "p", "1", "0", "0"],
+    ]
+    assert _rows(tmp_path, "Node tools")[2:] == [
+        [".", "main", "agent", "Read", "", "1", "0", "0"],
+        [".", "main", "agent", "mcp__p__solve", "p", "1", "0", "0"],
+    ]
+    report = (tmp_path / "stats.md").read_text()
+    assert "1 agent calls without tool data." in report
+    assert report.count("## Tools") == report.count("## Calls") == 1
+    assert report.endswith("- [child](child/stats.md)\n")
+
+
 @pytest.mark.parametrize("remote", [False, True])
 def test_parent_excludes_invocation_shaped_output_from_child_python_node(
     tmp_path: Path, remote: bool

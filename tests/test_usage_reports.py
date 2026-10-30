@@ -20,6 +20,7 @@ def _attempt(
     run_id: str = "current",
     status: str = "succeeded",
     attempt_id: str | None = None,
+    tool_calls: object = (),
 ) -> Path:
     visit_path = Path(report) / node / visit
     directory = root / visit_path / "invocations" / slot
@@ -37,6 +38,9 @@ def _attempt(
                 "report_path": Path(report).as_posix(),
                 "visit_path": visit_path.as_posix(),
                 "status": status,
+                "tool_calls": list(cast(tuple[object, ...], tool_calls))
+                if isinstance(tool_calls, tuple)
+                else tool_calls,
                 "usage": {
                     "input_tokens": tokens,
                     "cached_input_tokens": 0,
@@ -301,3 +305,67 @@ def test_bad_fork_provenance_remains_unknown_instead_of_hiding_attempts(
     external.write_bytes(original)
     manifest.symlink_to(external)
     assert _collect(root, ".", agent="agent")["agent"][0] == "2"
+
+
+def _call(name: str, **fields: object) -> dict[str, object]:
+    return {"name": name, "server": None, "error": False, "subagent": False} | (
+        fields
+    )
+
+
+def test_tool_calls_follow_attempt_attribution_and_stay_unknown(
+    tmp_path: Path,
+) -> None:
+    solve = _call("mcp__p__solve", server="p")
+    _attempt(
+        tmp_path,
+        ".",
+        "agent",
+        attempt_id="first",
+        tool_calls=(solve, solve | {"error": True}, _call("Read")),
+    )
+    _attempt(
+        tmp_path,
+        ".",
+        "agent",
+        slot="000002",
+        attempt_id="first",
+        tool_calls=(solve,),
+    )
+    _attempt(
+        tmp_path,
+        ".",
+        "agent",
+        slot="000003",
+        run_id="source",
+        tool_calls=(solve,),
+    )
+    _attempt(tmp_path, ".", "agent", slot="000004", tool_calls=None)
+    _attempt(
+        tmp_path,
+        ".",
+        "agent",
+        slot="000005",
+        tool_calls=(solve | {"subagent": "yes"},),
+    )
+    _attempt(
+        tmp_path,
+        ".",
+        "agent",
+        slot="000006",
+        tool_calls=(solve | {"subagent": True},),
+    )
+    rows = _usage_reports.collect(
+        tmp_path,
+        run_id="current",
+        report_path=Path(),
+        graph_path=Path(),
+        node_paths={"agent": (".", "graph", "agent", "agent")},
+    )
+    totals = rows[(".", "graph", "agent", "agent")]
+    assert totals.calls == 4
+    assert totals.tools_unknown == 2
+    assert totals.tool_rows() == [
+        ("Read", "", 1, 0, 0),
+        ("mcp__p__solve", "p", 3, 1, 1),
+    ]

@@ -370,6 +370,7 @@ class RunStatistics:
             ),
             ("Type", "Visits", "Seconds", *_usage_reports.HEADERS),
         )
+        tools = _tools_section(identities, usage, total_usage)
         report = self._output_dir / "stats.md"
         calls = ""
         if report.is_file():
@@ -378,7 +379,35 @@ class RunStatistics:
             if marker in existing:
                 calls = marker + existing.split(marker, 1)[1]
         report.write_text(
-            f"## Summary\n\n{summary}\n\n## Nodes\n\n{nodes}\n{calls}",
+            f"## Summary\n\n{summary}\n\n## Nodes\n\n{nodes}\n{tools}{calls}",
             encoding="utf-8",
             errors="backslashreplace",
         )
+
+
+def _tools_section(
+    identities: list[_usage_reports.NodeIdentity],
+    usage: Mapping[_usage_reports.NodeIdentity, _usage_reports.UsageTotals],
+    total: _usage_reports.UsageTotals,
+) -> str:
+    """List every recorded tool; readers filter, e.g. by MCP server."""
+    if not total.calls:
+        return ""
+    totals = _markdown.format_table(
+        total.tool_rows(), _usage_reports.TOOL_HEADERS
+    )
+    nodes = _markdown.format_table(
+        (
+            (*identity[:3], *row)
+            for identity in identities
+            if identity in usage
+            for row in usage[identity].tool_rows()
+        ),
+        ("Project", "Graph", "Node", *_usage_reports.TOOL_HEADERS),
+    )
+    unknown = (
+        f"\n\n{total.tools_unknown} agent calls without tool data."
+        if total.tools_unknown
+        else ""
+    )
+    return f"\n## Tools\n\n{totals}{unknown}\n\n## Node tools\n\n{nodes}\n"

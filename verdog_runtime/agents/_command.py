@@ -137,10 +137,12 @@ def invoke_provider(
         [CommandResult], tuple[str, ids.ProviderSessionId | None, str]
     ],
     /,
+    *,
+    sandbox: str | None = None,
 ) -> agent_declarations.AgentReply:
     """Own the lifecycle shared by every command-backed provider."""
     validate_session_request(request, provider)
-    _artifacts.begin(request, provider, model)
+    _artifacts.begin(request, provider, model, sandbox=sandbox)
     started = time.monotonic()
     returncode: int | None = None
     result: CommandResult | None = None
@@ -183,6 +185,7 @@ def invoke_provider(
             duration_seconds=time.monotonic() - started,
             returncode=returncode,
             provider_session_id=request.provider_session_id,
+            sandbox=sandbox,
         )
         if isinstance(error, agent_declarations.AgentInvocationError):
             raise
@@ -200,6 +203,7 @@ def invoke_provider(
             duration_seconds=time.monotonic() - started,
             returncode=returncode,
             provider_session_id=request.provider_session_id,
+            sandbox=sandbox,
         )
         raise
     finally:
@@ -213,6 +217,7 @@ def invoke_provider(
         duration_seconds=time.monotonic() - started,
         returncode=result.returncode,
         provider_session_id=provider_session_id,
+        sandbox=sandbox,
     )
     return agent_declarations.AgentReply(
         text=response, provider_session_id=provider_session_id

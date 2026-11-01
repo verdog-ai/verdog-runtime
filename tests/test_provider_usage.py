@@ -108,6 +108,7 @@ def test_codex_tool_calls_use_item_types_and_mcp_names() -> None:
     events = _events(
         item(type="agent_message", text="done"),
         item(type="reasoning", text="plan"),
+        item(type="error", message="bwrap: Creating new namespace failed"),
         item(type="command_execution", status="completed", exit_code=0),
         item(type="command_execution", status="declined"),
         item(type="mcp_tool_call", server="planner", tool="solve", error=None),
@@ -123,6 +124,7 @@ def test_codex_tool_calls_use_item_types_and_mcp_names() -> None:
     calls = _usage.tool_calls(events, "codex")
     assert calls is not None
     assert [(c["name"], c["server"], c["error"]) for c in calls] == [
+        ("error", None, True),
         ("command_execution", None, False),
         ("command_execution", None, True),
         ("solve", "planner", False),

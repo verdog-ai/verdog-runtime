@@ -34,6 +34,10 @@ not require the CLI or a backend installation to execute workflows.
 - [Interpreter reference](verdog_runtime/interpreter/README.md)
 - [Execution logs and statistics](https://drexlerd.github.io/verdog-website/logging.html)
 
+Runtime 0.1.9 adds the opt-in `CodexInvoker(danger_full_access=True)` for
+hosts where Codex's sandbox cannot start, records each invocation's effective
+`sandbox` in `metadata.json`, and counts Codex `error` items as failed tool calls.
+
 Runtime 0.1.6 stores checkpoint artifact inventories as add-only deltas and
 shares their ancestry in memory. Existing full-inventory checkpoints remain
 readable; existing run files are not rewritten.

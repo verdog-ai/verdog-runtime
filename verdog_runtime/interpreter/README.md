@@ -29,6 +29,16 @@ modules implement the same public protocol as a project-owned adapter. Persisten
 sessions resume their provider conversation within one run; fresh sessions always
 start fresh. A successful invocation advances the session immediately.
 
+`CodexInvoker` passes the request's access as Codex's `--sandbox` mode.
+`danger_full_access=True` opts one profile out of the sandbox for hosts where it
+cannot start, for example bwrap on Linux nodes without user network namespaces or
+with a read-only bind mount over `/tmp`. Every request of that profile then runs
+as `danger-full-access`, read-only requests included. Each invocation's
+`metadata.json` records the effective `sandbox`. Codex 0.165 also needs the
+`codex-code-mode-host` binary from its release archive next to `codex`. Without
+it, every tool call fails with "Code Mode is unavailable". Failed tool attempts
+and Codex `error` items are counted as `tool_calls` with `error: true`.
+
 Every edge entering a computational node selects one visit overload. The visit
 input type must exactly equal the source entity's declared output type (or the
 subroutine input type when the source is `enter`). Before invocation the runtime

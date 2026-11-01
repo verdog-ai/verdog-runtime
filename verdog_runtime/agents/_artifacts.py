@@ -13,6 +13,8 @@ def begin(
     provider: str,
     model: str | None,
     /,
+    *,
+    sandbox: str | None = None,
 ) -> None:
     metadata(
         request,
@@ -22,6 +24,7 @@ def begin(
         duration_seconds=None,
         returncode=None,
         provider_session_id=request.provider_session_id,
+        sandbox=sandbox,
     )
 
 
@@ -35,6 +38,7 @@ def complete(
     duration_seconds: float,
     returncode: int,
     provider_session_id: ids.ProviderSessionId | None,
+    sandbox: str | None = None,
 ) -> None:
     if reasoning:
         (request.artifact_dir / "reasoning.txt").write_text(reasoning, "utf-8")
@@ -46,6 +50,7 @@ def complete(
         duration_seconds=duration_seconds,
         returncode=returncode,
         provider_session_id=provider_session_id,
+        sandbox=sandbox,
     )
 
 
@@ -59,6 +64,7 @@ def metadata(
     duration_seconds: float | None,
     returncode: int | None,
     provider_session_id: ids.ProviderSessionId | None,
+    sandbox: str | None = None,
 ) -> None:
     value = {
         "status": status,
@@ -67,6 +73,8 @@ def metadata(
         "model": model,
         "workspace": str(request.workspace),
         "access": str(request.access),
+        # The provider's effective sandbox; None where it has no such flag.
+        "sandbox": sandbox,
         "duration": duration_seconds,
         "returncode": returncode,
         "session": str(request.session_id),

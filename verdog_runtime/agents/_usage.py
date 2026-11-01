@@ -162,7 +162,6 @@ def _codex_tools(
             None,
             "agent_message",
             "reasoning",
-            "error",
         ):
             continue
         mcp = kind == "mcp_tool_call"
@@ -170,7 +169,10 @@ def _codex_tools(
             {
                 "name": (_text(item.get("tool")) if mcp else None) or kind,
                 "server": _text(item.get("server")) if mcp else None,
-                "error": item.get("status") in ("failed", "declined")
+                # Error items keep failed attempts visible, such as a sandbox
+                # that cannot start any tool.
+                "error": kind == "error"
+                or item.get("status") in ("failed", "declined")
                 or item.get("error") is not None,
                 "subagent": False,
             }

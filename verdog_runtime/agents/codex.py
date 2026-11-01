@@ -26,6 +26,10 @@ class CodexInvoker:
     model: str | None = None
     reasoning_effort: str | None = None
     extra_args: tuple[str, ...] = ()
+    # Opt-in for hosts where Codex's sandbox cannot start (such as bwrap on
+    # clusters without network namespaces). Every request then runs without
+    # filesystem confinement, read-only requests included.
+    danger_full_access: bool = False
 
     def __post_init__(self) -> None:
         """Reject extra arguments that override runtime invocation flags."""
@@ -65,7 +69,15 @@ class CodexInvoker:
                 self.model,
                 self._command(request, last_message),
                 lambda result: _provider_result(result, last_message),
+                sandbox=self._sandbox(request),
             )
+
+    def _sandbox(self, request: agent_declarations.AgentRequest, /) -> str:
+        return (
+            "danger-full-access"
+            if self.danger_full_access
+            else str(request.access)
+        )
 
     def _command(
         self,
@@ -96,7 +108,7 @@ class CodexInvoker:
             )
         if not request.persistent:
             command.append("--ephemeral")
-        command.extend(("--sandbox", str(request.access)))
+        command.extend(("--sandbox", self._sandbox(request)))
         if request.provider_session_id is not None:
             subcommand = (
                 "fork"

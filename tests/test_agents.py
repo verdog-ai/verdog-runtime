@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import signal
@@ -1336,6 +1337,35 @@ def test_codex_parses_events_once_and_preserves_response_precedence(
     )
 
 
+@pytest.mark.parametrize("access", tuple(AgentAccess))
+def test_codex_full_access_is_opt_in_and_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, access: AgentAccess
+) -> None:
+    commands: list[Sequence[str]] = []
+
+    def run(command: Sequence[str], _request: AgentRequest, /) -> CommandResult:
+        commands.append(command)
+        Path(command[command.index("-o") + 1]).write_text("done", "utf-8")
+        return CommandResult(returncode=0, events="", stderr="")
+
+    monkeypatch.setattr("verdog_runtime.agents._command.run_command", run)
+    request = dataclasses.replace(_provider_request(tmp_path), access=access)
+    for invoker, sandbox in (
+        (CodexInvoker(), str(access)),
+        (CodexInvoker(danger_full_access=True), "danger-full-access"),
+    ):
+        invoker(request)
+        command = commands[-1]
+        assert command.count("--sandbox") == 1
+        assert command[command.index("--sandbox") + 1] == sandbox
+        metadata = cast(
+            dict[str, object],
+            json.loads((tmp_path / "metadata.json").read_text("utf-8")),
+        )
+        assert metadata["access"] == str(access)
+        assert metadata["sandbox"] == sandbox
+
+
 @pytest.mark.parametrize(
     ("terminal", "error"),
     [
@@ -1681,6 +1711,7 @@ print(provider + " stderr", file=sys.stderr)
             ),
             "provider_session": str(expected_session),
             "session": f"{provider}_session",
+            "sandbox": "read-only" if provider == "codex" else None,
             "status": "succeeded",
             "workspace": str(workspaces[number - 1].resolve()),
         }

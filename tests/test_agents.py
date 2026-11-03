@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from collections.abc import Callable, Sequence
@@ -2197,3 +2198,126 @@ def test_claude_keeps_tool_restriction_after_flag_looking_prompt(
     )._command(_provider_request(tmp_path))  # pyright: ignore[reportPrivateUsage]
     assert command[2:4] == ["--append-system-prompt", "--tools=Read"]
     assert command[-4:] == ["--permission-mode", "plan", "--tools", "Read"]
+
+
+@dataclass(slots=True)
+class _CapacityInvoker:
+    session_provider = "capacity-test"
+    session_capabilities = AgentSessionCapabilities(fork_latest=True)
+
+    requests: list[AgentRequest] = field(default_factory=list[AgentRequest])
+
+    def __call__(self, request: AgentRequest, /) -> AgentReply:
+        self.requests.append(request)
+        if len(self.requests) == 2:
+            raise AgentInvocationError("Selected model is at capacity")
+        return AgentReply(
+            text=f"reply-{len(self.requests)}",
+            provider_session_id=ProviderSessionId(
+                f"session-{len(self.requests)}"
+            ),
+        )
+
+
+def test_resume_retries_a_persistent_request_the_provider_rejected(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    invoker = _CapacityInvoker()
+
+    def first_implementation(
+        input: object,
+        state: EmptyState,
+        context: AgentNodeContext,
+        /,
+    ) -> Success[object, EmptyState]:
+        context.invoke("first", workspace=workspace)
+        return Success(output=input, state=state)
+
+    def second_implementation(
+        input: object,
+        state: EmptyState,
+        context: AgentNodeContext,
+        /,
+    ) -> Success[object, EmptyState]:
+        scratch = Path(tempfile.mkdtemp(dir=tmp_path))
+        return Success(
+            output=context.invoke(f"notes in {scratch}", workspace=workspace),
+            state=state,
+        )
+
+    enter = PortDefinition(id=NodeId("enter"))
+    exit_ = PortDefinition(id=NodeId("exit"))
+    first = NodeDefinition[EmptyState, object](
+        id=NodeId("first"),
+        name="First",
+        state_type=EmptyState,
+        operation=Agent(
+            profile=AgentProfileId("default"),
+            session=AgentSessionId("conversation"),
+        ),
+    )
+    second = replace(first, id=NodeId("second"), name="Second")
+    graph = GraphDefinition[object, object, None, object](
+        id=GraphId("agent.capacity"),
+        params_type=type(None),
+        enter=enter,
+        exit=exit_,
+        failure=PortDefinition(id=NodeId("failure")),
+        nodes=(first, second),
+        profile_parameters=(
+            AgentProfileParameter(id=AgentProfileId("default"), name="default"),
+        ),
+        session_parameters=(
+            AgentSessionParameter(
+                id=AgentSessionId("conversation"),
+                name="conversation",
+            ),
+        ),
+        edges=(
+            EdgeDefinition(
+                id=EdgeId("enter-first"),
+                source=enter.id,
+                target=first.id,
+                visit=VisitDefinition(implementation=first_implementation),
+            ),
+            EdgeDefinition(
+                id=EdgeId("first-second"),
+                source=first.id,
+                target=second.id,
+                visit=VisitDefinition(implementation=second_implementation),
+            ),
+            EdgeDefinition(
+                id=EdgeId("second-exit"),
+                source=second.id,
+                target=exit_.id,
+            ),
+        ),
+    )
+    definition = _workflow(
+        graph,
+        WorkflowConfiguration(
+            profile_arguments={AgentProfileId("default"): invoker}
+        ),
+    )
+    output = tmp_path / "output"
+    with pytest.raises(AgentInvocationError, match="at capacity"):
+        Dispatcher(project_root=tmp_path).run(
+            definition,
+            None,
+            output_dir=output,
+            checkpointing=CheckpointPolicy.REQUIRED,
+        )
+
+    # The rejected request produced no reply, so a resume sends a fresh one
+    # even though its prompt differs, and needs no --retry-incomplete.
+    resumed = Dispatcher(project_root=tmp_path).resume(
+        definition, output_dir=output
+    )
+    assert resumed.output == "reply-3"
+    first, rejected, retried = invoker.requests
+    assert first.provider_session_id is None
+    assert rejected.prompt != retried.prompt
+    assert retried.provider_session_id == rejected.provider_session_id
+    assert retried.provider_session_action is AgentSessionAction.FORK

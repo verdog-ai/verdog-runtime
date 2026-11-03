@@ -34,6 +34,12 @@ not require the CLI or a backend installation to execute workflows.
 - [Interpreter reference](verdog_runtime/interpreter/README.md)
 - [Execution logs and statistics](https://drexlerd.github.io/verdog-website/logging.html)
 
+Runtime 0.1.10 records an agent request the provider rejected with an error,
+such as a model at capacity, as `failed` in the invocation journal. A resume
+sends a fresh request for it without `--retry-incomplete`, even if its prompt
+changed; interrupted requests still need the flag. An identity mismatch now
+names the differing request fields.
+
 Runtime 0.1.9 adds the opt-in `CodexInvoker(danger_full_access=True)` for
 hosts where Codex's sandbox cannot start, records each invocation's effective
 `sandbox` in `metadata.json`, and counts Codex `error` items as failed tool calls.

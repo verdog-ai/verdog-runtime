@@ -137,6 +137,11 @@ def test_resume_refuses_a_changed_request_at_the_same_boundary(
     with pytest.raises(InvocationJournalError) as captured:
         journal.prepare(address, changed, "test")
     assert captured.value.code == "invocation.identity_mismatch"
+    assert captured.value.details == {
+        "path": str(next((output / ".verdog/invocations").glob("*.json"))),
+        "field": "request",
+        "fields": ["prompt_sha256"],
+    }
 
 
 def test_invalid_usage_snapshot_keeps_journal_error_diagnostics(

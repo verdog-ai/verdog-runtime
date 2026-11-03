@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
 from typing import TypeVar, cast
 
@@ -86,15 +87,17 @@ def _invoke_with_recovery(
     try:
         reply = _agent_reply(profile(request))
     except BaseException as error:
+        cancelled = isinstance(
+            error, (cancellation_module.ExecutionCancelled, KeyboardInterrupt)
+        )
+        if not cancelled and journal is not None and address is not None:
+            # A cancelled request stays ambiguous; a raised one is settled.
+            with contextlib.suppress(Exception):
+                journal.fail(address, request, provider)
         try:
             ending = _usage.finish(
                 request.artifact_dir,
-                "cancelled"
-                if isinstance(
-                    error,
-                    (cancellation_module.ExecutionCancelled, KeyboardInterrupt),
-                )
-                else "failed",
+                "cancelled" if cancelled else "failed",
                 request.provider_session_id
                 if request.provider_session_action
                 is agents.AgentSessionAction.CONTINUE

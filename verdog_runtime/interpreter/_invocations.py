@@ -234,9 +234,15 @@ class InvocationJournal:
             return None
 
         record = _object(path)
-        self._validate_identity(path, record, address, requested)
         status = record.get("status")
         attempt = self._attempt(path, record)
+        if status == "failed":
+            # The provider answered with an error: no reply to replay, so the
+            # resumed request may differ from the rejected one.
+            self._validate_address(path, record, address)
+            self._write_started(path, address, requested, attempt=attempt + 1)
+            return None
+        self._validate_identity(path, record, address, requested)
         if status == "started":
             if not self.retry_incomplete:
                 raise InvocationJournalError(
@@ -330,6 +336,26 @@ class InvocationJournal:
             reply, replayed=False, usage_snapshot=usage_snapshot
         )
 
+    def fail(
+        self,
+        address: InvocationAddress,
+        request: agent_declarations.AgentRequest,
+        provider: str,
+        /,
+    ) -> None:
+        """Record that the provider returned an error instead of a reply."""
+        requested = InvocationRequestRecord.from_request(request, provider)
+        path = self._path(address)
+        record = _object(path)
+        self._validate_identity(path, record, address, requested)
+        if record.get("status") != "started":
+            raise InvocationJournalError(
+                "agent invocation was not in progress when it failed",
+                code="invocation.journal_conflict",
+                details={"path": str(path)},
+            )
+        _run_metadata.atomic_json(path, {**record, "status": "failed"})
+
     def is_retry(self, address: InvocationAddress) -> bool:
         path = self._path(address)
         return self._attempt(path, _object(path)) > 1
@@ -364,11 +390,10 @@ class InvocationJournal:
         )
 
     @staticmethod
-    def _validate_identity(
+    def _validate_address(
         path: pathlib.Path,
         record: dict[str, object],
         address: InvocationAddress,
-        request: InvocationRequestRecord,
     ) -> None:
         if record.get("address") != address.as_json():
             raise InvocationJournalError(
@@ -379,14 +404,36 @@ class InvocationJournal:
                 code="invocation.identity_mismatch",
                 details={"path": str(path), "field": "address"},
             )
-        if record.get("request") != request.as_json():
+
+    @classmethod
+    def _validate_identity(
+        cls,
+        path: pathlib.Path,
+        record: dict[str, object],
+        address: InvocationAddress,
+        request: InvocationRequestRecord,
+    ) -> None:
+        cls._validate_address(path, record, address)
+        recorded = record.get("request")
+        expected = request.as_json()
+        if recorded != expected:
+            fields = sorted(
+                key
+                for key in expected
+                if not isinstance(recorded, dict)
+                or cast(dict[str, object], recorded).get(key) != expected[key]
+            )
             raise InvocationJournalError(
                 (
                     "agent invocation journal request does not match "
-                    "the resumed request"
+                    f"the resumed request ({', '.join(fields)})"
                 ),
                 code="invocation.identity_mismatch",
-                details={"path": str(path), "field": "request"},
+                details={
+                    "path": str(path),
+                    "field": "request",
+                    "fields": fields,
+                },
             )
 
     @classmethod
